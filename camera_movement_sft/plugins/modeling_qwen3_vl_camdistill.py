@@ -1373,7 +1373,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 # image == 1, video == 2
                 else:
                     grid_thw = next(grid_iters[modality_type])
-                    # CamDistill/VGGT-Direct: 是否为每帧额外引入 camera token 的 position
+                    # CamDistill/CamInject: 是否为每帧额外引入 camera token 的 position
                     # - direct: encode 阶段已扩展 input_ids，需要在 collator/forward 都启用
                     # - learn: 仅在 forward 阶段启用（保留旧行为）
                     cam_mode = getattr(self, '_camdistill_mode', 'learn')
@@ -1575,7 +1575,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 return [x for x in video_ids if isinstance(x, str) and x]
             return []
 
-        # CamDistill/VGGT-Direct: 标记进入 forward (区分 collator 调用 get_rope_index)
+        # CamDistill/CamInject: 标记进入 forward (区分 collator 调用 get_rope_index)
         self._in_forward = True
 
         if inputs_embeds is None:
@@ -1615,7 +1615,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             deepstack_video_embeds = video_outputs.deepstack_features
             video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
 
-            # === CamDistill / VGGT-Direct: 注入 camera tokens ===
+            # === CamDistill / CamInject: 注入 camera tokens ===
             vit_intermediates = getattr(self.visual, '_camdistill_layer_cache', [])
             _should_inject = (
                 camdistill_module is not None
@@ -1700,7 +1700,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                         actual_video_tokens = int(video_embeds.shape[0])
                         if expected_video_tokens != actual_video_tokens:
                             raise RuntimeError(
-                                f"[VGGT-Direct] camera-expanded token count mismatch: "
+                                f"[CamInject] camera-expanded token count mismatch: "
                                 f"input_ids video tokens={expected_video_tokens}, "
                                 f"video_embeds tokens={actual_video_tokens}"
                             )
@@ -1779,7 +1779,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             **kwargs,
         )
 
-        # CamDistill/VGGT-Direct: 退出 forward
+        # CamDistill/CamInject: 退出 forward
         self._in_forward = False
 
         return Qwen3VLModelOutputWithPast(

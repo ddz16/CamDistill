@@ -127,9 +127,9 @@ MAX_NEW_TOKENS=4096
 MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-16}"
 
 # ================================
-# VGGT-Direct 评测可选配置
+# CamInject 评测可选配置
 # ================================
-USE_VGGT_DIRECT="${USE_VGGT_DIRECT:-0}"                 # 1: 使用 vggt-direct 插件推理
+USE_CAMINJECT="${USE_CAMINJECT:-0}"                     # 1: 使用 caminject 插件推理
 VGGT_MODE="${VGGT_MODE:-cache}"                         # cache 或 online
 VGGT_CACHE_DIR="${VGGT_CACHE_DIR:-}"                    # cache 模式必填
 VGGT_TEACHER_TYPE="${VGGT_TEACHER_TYPE:-vggt}"          # vggt 或 vggt_omega
@@ -141,25 +141,25 @@ if [ -z "${VGGT_MODEL_PATH}" ]; then
         VGGT_MODEL_PATH="facebook/VGGT-1B"
     fi
 fi
-VGGT_MODEL_TYPE="${VGGT_MODEL_TYPE:-qwen3_vl_vggt_direct}"  # qwen3.5 请改成 qwen3_5_vggt_direct
+CAMINJECT_MODEL_TYPE="${CAMINJECT_MODEL_TYPE:-qwen3_vl_caminject}"  # qwen3.5 请改成 qwen3_5_caminject
 VGGT_ONLINE_FPS="${VGGT_ONLINE_FPS:-${FPS}}"
 VGGT_ONLINE_MAX_FRAMES="${VGGT_ONLINE_MAX_FRAMES:-${FPS_MAX_FRAMES}}"
-VGGT_DIRECT_STRICT_IDS="${VGGT_DIRECT_STRICT_IDS:-1}"
-VGGT_DIRECT_STRICT_CACHE="${VGGT_DIRECT_STRICT_CACHE:-1}"
-VGGT_DIRECT_MAX_MISS_RATIO="${VGGT_DIRECT_MAX_MISS_RATIO:-0.0}"
-VGGT_DIRECT_MIN_RATIO_SAMPLES="${VGGT_DIRECT_MIN_RATIO_SAMPLES:-32}"
-VGGT_DIRECT_LOG_EVERY="${VGGT_DIRECT_LOG_EVERY:-50}"
-VGGT_PLUGIN_PATH="${VGGT_PLUGIN_PATH:-camera_movement_sft/plugins/camdistill_plugin.py}"
+CAMINJECT_STRICT_IDS="${CAMINJECT_STRICT_IDS:-1}"
+CAMINJECT_STRICT_CACHE="${CAMINJECT_STRICT_CACHE:-1}"
+CAMINJECT_MAX_MISS_RATIO="${CAMINJECT_MAX_MISS_RATIO:-0.0}"
+CAMINJECT_MIN_RATIO_SAMPLES="${CAMINJECT_MIN_RATIO_SAMPLES:-32}"
+CAMINJECT_LOG_EVERY="${CAMINJECT_LOG_EVERY:-50}"
+CAMINJECT_PLUGIN_PATH="${CAMINJECT_PLUGIN_PATH:-camera_movement_sft/plugins/camdistill_plugin.py}"
 
-if [ "${USE_VGGT_DIRECT}" = "1" ]; then
+if [ "${USE_CAMINJECT}" = "1" ]; then
     export VGGT_MODE VGGT_CACHE_DIR VGGT_TEACHER_TYPE VGGT_MODEL_PATH
     export VGGT_ONLINE_FPS VGGT_ONLINE_MAX_FRAMES
-    export VGGT_DIRECT_STRICT_IDS VGGT_DIRECT_STRICT_CACHE
-    export VGGT_DIRECT_MAX_MISS_RATIO VGGT_DIRECT_MIN_RATIO_SAMPLES VGGT_DIRECT_LOG_EVERY
+    export CAMINJECT_STRICT_IDS CAMINJECT_STRICT_CACHE
+    export CAMINJECT_MAX_MISS_RATIO CAMINJECT_MIN_RATIO_SAMPLES CAMINJECT_LOG_EVERY
 
     if [ "${VGGT_MODE}" = "cache" ]; then
         if [ -z "${VGGT_CACHE_DIR}" ]; then
-            echo "[ERROR] USE_VGGT_DIRECT=1 且 VGGT_MODE=cache 时必须设置 VGGT_CACHE_DIR"
+            echo "[ERROR] USE_CAMINJECT=1 且 VGGT_MODE=cache 时必须设置 VGGT_CACHE_DIR"
             exit 1
         fi
         if [ ! -d "${VGGT_CACHE_DIR}" ]; then
@@ -173,16 +173,16 @@ if [ "${USE_VGGT_DIRECT}" = "1" ]; then
         exit 1
     fi
 
-    if [ ! -f "${VGGT_PLUGIN_PATH}" ]; then
-        echo "[ERROR] VGGT 插件不存在: ${VGGT_PLUGIN_PATH}"
+    if [ ! -f "${CAMINJECT_PLUGIN_PATH}" ]; then
+        echo "[ERROR] CamInject 插件不存在: ${CAMINJECT_PLUGIN_PATH}"
         exit 1
     fi
 fi
 
-VGGT_INFER_EXTRA_ARGS=()
-if [ "${USE_VGGT_DIRECT}" = "1" ]; then
-    VGGT_INFER_EXTRA_ARGS+=(--model_type "${VGGT_MODEL_TYPE}")
-    VGGT_INFER_EXTRA_ARGS+=(--external_plugins "${VGGT_PLUGIN_PATH}")
+CAMINJECT_INFER_EXTRA_ARGS=()
+if [ "${USE_CAMINJECT}" = "1" ]; then
+    CAMINJECT_INFER_EXTRA_ARGS+=(--model_type "${CAMINJECT_MODEL_TYPE}")
+    CAMINJECT_INFER_EXTRA_ARGS+=(--external_plugins "${CAMINJECT_PLUGIN_PATH}")
 fi
 
 # ================================
@@ -191,11 +191,11 @@ fi
 # 如 Qwen2_5_VLForConditionalGeneration 同时匹配 qwen2_5_vl / mimo_vl），需手动指定。
 #   例: 评测 cam-motion-7b
 #   BASE_MODEL=chancharikm/qwen2.5-vl-7b-cam-motion MODEL_TAG=cam_motion_7b MODEL_TYPE=qwen2_5_vl bash ...
-# 注意: USE_VGGT_DIRECT=1 时 model_type 已由 VGGT 分支指定，勿再设 MODEL_TYPE。
+# 注意: USE_CAMINJECT=1 时 model_type 已由 CamInject 分支指定，勿再设 MODEL_TYPE。
 # ================================
 MODEL_TYPE="${MODEL_TYPE:-}"
 MODEL_TYPE_ARGS=()
-if [ -n "${MODEL_TYPE}" ] && [ "${USE_VGGT_DIRECT}" != "1" ]; then
+if [ -n "${MODEL_TYPE}" ] && [ "${USE_CAMINJECT}" != "1" ]; then
     MODEL_TYPE_ARGS+=(--model_type "${MODEL_TYPE}" --template "${MODEL_TYPE}")
 fi
 
@@ -224,12 +224,12 @@ echo "训练目录: ${TRAIN_OUTPUT_DIR}"
 echo "训练标签 (TRAIN_TAG): ${TRAIN_TAG}"
 echo "Checkpoints: ${CHECKPOINTS[*]}"
 echo "推理后端: ${INFER_BACKEND}"
-echo "USE_VGGT_DIRECT: ${USE_VGGT_DIRECT}"
-if [ "${USE_VGGT_DIRECT}" = "1" ]; then
+echo "USE_CAMINJECT: ${USE_CAMINJECT}"
+if [ "${USE_CAMINJECT}" = "1" ]; then
     echo "VGGT mode: ${VGGT_MODE}"
     echo "VGGT teacher: ${VGGT_TEACHER_TYPE}"
     echo "VGGT model: ${VGGT_MODEL_PATH}"
-    echo "VGGT model_type: ${VGGT_MODEL_TYPE}"
+    echo "CamInject model_type: ${CAMINJECT_MODEL_TYPE}"
     echo "VGGT cache: ${VGGT_CACHE_DIR:-<disabled>}"
     echo "VGGT online fps/max_frames: ${VGGT_ONLINE_FPS}/${VGGT_ONLINE_MAX_FRAMES}"
 fi
@@ -336,7 +336,7 @@ for RAW_TEST_DATA in "${RAW_TEST_DATA_LIST[@]}"; do
             NPROC_PER_NODE="${NPROC_PER_NODE:-8}" \
             swift infer \
                 --model ${MODEL} \
-                "${VGGT_INFER_EXTRA_ARGS[@]}" \
+                "${CAMINJECT_INFER_EXTRA_ARGS[@]}" \
                 "${MODEL_TYPE_ARGS[@]}" \
                 --infer_backend ${INFER_BACKEND} \
                 --val_dataset ${TEST_DATA_SWIFT} \

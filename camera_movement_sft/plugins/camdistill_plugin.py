@@ -26,7 +26,6 @@ if _plugin_dir not in sys.path:
 # 1. 注册自定义 Loss
 # ============================================================
 from camdistill_loss import CamDistillLoss  # noqa: F401 (side-effect: registers in loss_map)
-import camera_loss_scale  # noqa: F401 (side-effect: registers loss_scale 'camera_value')
 
 # ============================================================
 # 2. 注册自定义 Model Loader (带 CamDistill 模块)
@@ -343,9 +342,9 @@ except ImportError:
 
 
 # ============================================================
-# 4. VGGT-Direct Baseline (完整注入实现)
+# 4. CamInject Baseline (完整注入实现)
 # ============================================================
-from vggt_direct_model import VGGTDirectCameraAdapter
+from caminject_model import CamInjectAdapter
 
 
 def _try_load_camdistill_module_from_checkpoint(model_dir: str, camdistill_module: nn.Module) -> None:
@@ -437,11 +436,11 @@ def _try_load_camdistill_module_from_checkpoint(model_dir: str, camdistill_modul
         print(f"[CamDistill] module restored from checkpoint: {len(loaded)} tensors")
 
 
-def _try_load_vggt_projector_from_checkpoint(model_dir: str, adapter: nn.Module) -> None:
-    """从 checkpoint 手动恢复 VGGT-Direct projector 参数。
+def _try_load_caminject_projector_from_checkpoint(model_dir: str, adapter: nn.Module) -> None:
+    """从 checkpoint 手动恢复 CamInject projector 参数。
 
     背景: ms-swift 先加载基础模型再由插件挂接 adapter，导致 checkpoint 里的
-    `model._camdistill_module.projector.*` / `vggt_direct_adapter.projector.*`
+    `model._camdistill_module.projector.*` / `caminject_adapter.projector.*`
     在主加载阶段可能被报告为 UNEXPECTED。这里做一次显式恢复，避免 projector 随机初始化。
     """
     projector = getattr(adapter, 'projector', None)
@@ -452,7 +451,7 @@ def _try_load_vggt_projector_from_checkpoint(model_dir: str, adapter: nn.Module)
     target_keys = list(target_state.keys())
     key_prefixes = (
         'model._camdistill_module.projector.',
-        'vggt_direct_adapter.projector.',
+        'caminject_adapter.projector.',
         '_camdistill_module.projector.',
         'projector.',
     )
@@ -464,7 +463,7 @@ def _try_load_vggt_projector_from_checkpoint(model_dir: str, adapter: nn.Module)
     try:
         from safetensors import safe_open
     except Exception as e:
-        print(f"[VGGT-Direct] WARNING: safetensors not available, skip projector restore: {e}")
+        print(f"[CamInject] WARNING: safetensors not available, skip projector restore: {e}")
         return
 
     try:
@@ -506,7 +505,7 @@ def _try_load_vggt_projector_from_checkpoint(model_dir: str, adapter: nn.Module)
         else:
             return
     except Exception as e:
-        print(f"[VGGT-Direct] WARNING: projector restore failed while reading checkpoint: {e}")
+        print(f"[CamInject] WARNING: projector restore failed while reading checkpoint: {e}")
         return
 
     if not loaded:
@@ -515,33 +514,33 @@ def _try_load_vggt_projector_from_checkpoint(model_dir: str, adapter: nn.Module)
     try:
         incompatible = projector.load_state_dict(loaded, strict=False)
     except Exception as e:
-        print(f"[VGGT-Direct] WARNING: projector restore failed while loading state_dict: {e}")
+        print(f"[CamInject] WARNING: projector restore failed while loading state_dict: {e}")
         return
 
     missing = [k for k in target_keys if k not in loaded]
     if missing or incompatible.unexpected_keys:
         print(
-            f"[VGGT-Direct] WARNING: projector partial restore, loaded={len(loaded)}/{len(target_keys)}, "
+            f"[CamInject] WARNING: projector partial restore, loaded={len(loaded)}/{len(target_keys)}, "
             f"missing={missing}, unexpected={incompatible.unexpected_keys}"
         )
     else:
-        print(f"[VGGT-Direct] projector restored from checkpoint: {len(loaded)} tensors")
+        print(f"[CamInject] projector restored from checkpoint: {len(loaded)} tensors")
 
 
-def _make_vggt_direct_loader(base_loader_cls, model_file_module_name: str):
+def _make_caminject_loader(base_loader_cls, model_file_module_name: str):
     """
-    工厂函数: 为指定的 base loader 创建 VGGT-Direct 版本的 Loader。
+    工厂函数: 为指定的 base loader 创建 CamInject 版本的 Loader。
 
-    VGGT-Direct 与 CamDistill 共享完全相同的注入逻辑 (modified forward),
+    CamInject 与 CamDistill 共享完全相同的注入逻辑 (modified forward),
     唯一区别是 camera_embeds 来源:
       - CamDistill: CameraTokenModule(vit_intermediates) -> camera_embeds
-      - VGGT-Direct: VGGT_cache -> VGGTProjector -> camera_embeds
+      - CamInject:  VGGT_cache -> VGGTProjector -> camera_embeds
 
     通过设置 _camdistill_mode='direct', modified forward 会跳过 vit_intermediates 检查,
-    直接调用 VGGTDirectCameraAdapter (它忽略 vit_intermediates, 从 cache 加载)。
+    直接调用 CamInjectAdapter (它忽略 vit_intermediates, 从 cache 加载)。
     """
 
-    class VGGTDirectLoader(base_loader_cls):
+    class CamInjectLoader(base_loader_cls):
         def get_model(self, model_dir, config, processor, model_kwargs):
             model = super().get_model(model_dir, config, processor, model_kwargs)
 
@@ -550,10 +549,10 @@ def _make_vggt_direct_loader(base_loader_cls, model_file_module_name: str):
             vggt_cache_dir = os.environ.get("VGGT_CACHE_DIR", "")
 
             if not vggt_cache_dir:
-                print("[VGGT-Direct] WARNING: VGGT_CACHE_DIR not set! Camera tokens will be zeros.")
+                print("[CamInject] WARNING: VGGT_CACHE_DIR not set! Camera tokens will be zeros.")
 
-            # 创建 VGGTDirectCameraAdapter (与 CameraTokenModule 相同接口)
-            adapter = VGGTDirectCameraAdapter(
+            # 创建 CamInjectAdapter (与 CameraTokenModule 相同接口)
+            adapter = CamInjectAdapter(
                 llm_dim=llm_hidden_dim,
                 vggt_dim=2048,
                 temporal_patch_size=temporal_patch_size,
@@ -568,15 +567,15 @@ def _make_vggt_direct_loader(base_loader_cls, model_file_module_name: str):
             inner_model._camdistill_preexpanded_input = True
 
             # 也在顶层设置引用
-            model.vggt_direct_adapter = adapter
+            model.caminject_adapter = adapter
 
             # 显式恢复 projector 权重，避免 checkpoint 中插件参数在主加载阶段被当作 UNEXPECTED 后丢失。
-            _try_load_vggt_projector_from_checkpoint(model_dir, adapter)
+            _try_load_caminject_projector_from_checkpoint(model_dir, adapter)
 
-            # 不需要设置 ViT 中间层缓存 (VGGT-Direct 不用)
+            # 不需要设置 ViT 中间层缓存 (CamInject 不用)
             # inner_model.visual._camdistill_extract_layers 不设置
 
-            print(f"[VGGT-Direct] VGGTDirectCameraAdapter initialized:")
+            print(f"[CamInject] CamInjectAdapter initialized:")
             print(f"  llm_dim={llm_hidden_dim}, temporal_patch_size={temporal_patch_size}")
             print(f"  cache_dir={vggt_cache_dir}")
             print(f"  projector params: {sum(p.numel() for p in adapter.projector.parameters()) / 1e6:.1f}M")
@@ -594,52 +593,51 @@ def _make_vggt_direct_loader(base_loader_cls, model_file_module_name: str):
             inner_model.get_rope_index = types.MethodType(
                 Qwen3VLModelCamDistill.get_rope_index, inner_model
             )
-            print(f"[VGGT-Direct] Inner forward patched for camera token injection (mode=direct)")
+            print(f"[CamInject] Inner forward patched for camera token injection (mode=direct)")
 
             return model
 
-    VGGTDirectLoader.__name__ = f"VGGTDirect{base_loader_cls.__name__}"
-    VGGTDirectLoader.__qualname__ = VGGTDirectLoader.__name__
-    return VGGTDirectLoader
+    CamInjectLoader.__name__ = f"CamInject{base_loader_cls.__name__}"
+    CamInjectLoader.__qualname__ = CamInjectLoader.__name__
+    return CamInjectLoader
 
-
-# Qwen3-VL VGGT-Direct
-VGGTDirectQwen3VLLoader = _make_vggt_direct_loader(Qwen3VLLoader, "modeling_qwen3_vl_camdistill")
+# Qwen3-VL CamInject
+CamInjectQwen3VLLoader = _make_caminject_loader(Qwen3VLLoader, "modeling_qwen3_vl_camdistill")
 
 register_model(
     ModelMeta(
-        "qwen3_vl_vggt_direct",
+        "qwen3_vl_caminject",
         [
             ModelGroup([
                 Model("Qwen/Qwen3-VL-4B-Instruct", "Qwen/Qwen3-VL-4B-Instruct"),
                 Model("Qwen/Qwen3-VL-8B-Instruct", "Qwen/Qwen3-VL-8B-Instruct"),
             ], TemplateType.qwen3_vl),
         ],
-        VGGTDirectQwen3VLLoader,
+        CamInjectQwen3VLLoader,
         architectures=["Qwen3VLForConditionalGeneration"],
         is_multimodal=True,
     ),
 )
 
-# Qwen3.5 VGGT-Direct
+# Qwen3.5 CamInject
 try:
-    VGGTDirectQwen35Loader = _make_vggt_direct_loader(Qwen3_5Loader, "modeling_qwen3_vl_camdistill")
+    CamInjectQwen35Loader = _make_caminject_loader(Qwen3_5Loader, "modeling_qwen3_vl_camdistill")
 
     register_model(
         ModelMeta(
-            "qwen3_5_vggt_direct",
+            "qwen3_5_caminject",
             [
                 ModelGroup([
                     Model("Qwen/Qwen3.5-4B", "Qwen/Qwen3.5-4B"),
                     Model("Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-9B"),
                 ], TemplateType.qwen3_5),
             ],
-            VGGTDirectQwen35Loader,
+            CamInjectQwen35Loader,
             architectures=["Qwen3_5ForConditionalGeneration"],
             is_multimodal=True,
         ),
     )
-    print("[VGGT-Direct] Qwen3.5 VGGT-Direct models registered.")
+    print("[CamInject] Qwen3.5 CamInject models registered.")
 except NameError:
     pass
 
@@ -647,7 +645,7 @@ except NameError:
 # ============================================================
 # 5. Video ID 注入机制 (Template monkey-patch)
 # ============================================================
-# 目标: 让 VGGT-Direct 在 model.forward 中稳定拿到 video_ids。
+# 目标: 让 CamInject 在 model.forward 中稳定拿到 video_ids。
 # 实现:
 #   1. patch Template.encode: 在样本级 features 增加 `video_ids`
 #   2. patch Template._data_collator_mm_data: 将 batch 内的 `video_ids` 显式透传到模型
@@ -657,17 +655,15 @@ except NameError:
 #   - 双 patch 后，video_ids 会和 video_grid_thw 一起进入 forward kwargs。
 
 _VIDEO_ID_PATCH_APPLIED = False
-_VGGT_DIRECT_MODEL_TYPES = {'qwen3_vl_vggt_direct', 'qwen3_5_vggt_direct'}
+_CAMINJECT_MODEL_TYPES = {'qwen3_vl_caminject', 'qwen3_5_caminject'}
 _CAMDISTILL_MODEL_TYPES = {'qwen3_vl_camdistill', 'qwen3_5_camdistill'}
 
-
-def _is_vggt_direct_model(template) -> bool:
+def _is_caminject_model(template) -> bool:
     model_type = getattr(getattr(template, 'model_meta', None), 'model_type', None)
     if isinstance(model_type, str) and model_type:
-        return model_type in _VGGT_DIRECT_MODEL_TYPES
+        return model_type in _CAMINJECT_MODEL_TYPES
     model_type_env = os.environ.get('MODEL_TYPE', '')
-    return model_type_env in _VGGT_DIRECT_MODEL_TYPES
-
+    return model_type_env in _CAMINJECT_MODEL_TYPES
 
 def _is_camdistill_model(template) -> bool:
     model_type = getattr(getattr(template, 'model_meta', None), 'model_type', None)
@@ -676,9 +672,8 @@ def _is_camdistill_model(template) -> bool:
     model_type_env = os.environ.get('MODEL_TYPE', '')
     return model_type_env in _CAMDISTILL_MODEL_TYPES
 
-
 def _is_camera_injection_model(template) -> bool:
-    return _is_vggt_direct_model(template) or _is_camdistill_model(template)
+    return _is_caminject_model(template) or _is_camdistill_model(template)
 
 
 def _is_qwen_vl_template_for_camera_patch(template) -> bool:
@@ -719,7 +714,7 @@ def _expand_single_sample_for_camera(
     K = int(tokens_per_frame)
     if K != 1:
         raise RuntimeError(
-            f"[VGGT-Direct] unsupported tokens_per_frame={K}, expected 1"
+            f"[CamInject] unsupported tokens_per_frame={K}, expected 1"
         )
 
     t_total = int(video_grid_thw[:, 0].sum().item())
@@ -733,7 +728,7 @@ def _expand_single_sample_for_camera(
         if isinstance(value, list):
             if len(value) != old_len:
                 raise RuntimeError(
-                    f"[VGGT-Direct] {field_name} length mismatch before camera expansion: "
+                    f"[CamInject] {field_name} length mismatch before camera expansion: "
                     f"got={len(value)}, expected={old_len}"
                 )
             return torch.tensor(value, dtype=list_dtype), 'list'
@@ -744,13 +739,13 @@ def _expand_single_sample_for_camera(
                 tensor = tensor[0]
             if tensor.dim() != 1 or tensor.shape[0] != old_len:
                 raise RuntimeError(
-                    f"[VGGT-Direct] {field_name} length mismatch before camera expansion: "
+                    f"[CamInject] {field_name} length mismatch before camera expansion: "
                     f"got={tuple(tensor.shape)}, expected=({old_len},)"
                 )
             return tensor, 'tensor'
 
         raise RuntimeError(
-            f"[VGGT-Direct] unsupported {field_name} type before camera expansion: {type(value)}"
+            f"[CamInject] unsupported {field_name} type before camera expansion: {type(value)}"
         )
 
     input_ids_1d = torch.tensor(input_ids, dtype=torch.long)
@@ -778,13 +773,13 @@ def _expand_single_sample_for_camera(
 
     vid_mask = (input_ids_1d == video_token_id)
     if not vid_mask.any():
-        raise RuntimeError('[VGGT-Direct] video_grid_thw exists but input_ids has no video token placeholders')
+        raise RuntimeError('[CamInject] video_grid_thw exists but input_ids has no video token placeholders')
     shifted = torch.zeros_like(vid_mask)
     shifted[1:] = vid_mask[:-1]
     segment_count = int((vid_mask & ~shifted).sum().item())
     if segment_count != t_total:
         raise RuntimeError(
-            f"[VGGT-Direct] segment_count mismatch before camera expansion: "
+            f"[CamInject] segment_count mismatch before camera expansion: "
             f"segment_count={segment_count}, t_total={t_total}. "
             'Expected one contiguous video segment per frame.'
         )
@@ -808,7 +803,7 @@ def _expand_single_sample_for_camera(
     expected_len = old_len + t_total * K
     if new_len != expected_len:
         raise RuntimeError(
-            f"[VGGT-Direct] expanded input_ids length mismatch: got={new_len}, "
+            f"[CamInject] expanded input_ids length mismatch: got={new_len}, "
             f"expected={expected_len}, t_total={t_total}, tokens_per_frame={K}"
         )
 
@@ -834,7 +829,7 @@ def _expand_single_sample_for_camera(
     dst_positions = dst_positions_list[0]
     if dst_positions.numel() != old_len:
         raise RuntimeError(
-            f"[VGGT-Direct] dst_positions length mismatch: got={dst_positions.numel()}, expected={old_len}"
+            f"[CamInject] dst_positions length mismatch: got={dst_positions.numel()}, expected={old_len}"
         )
 
     new_labels = torch.full((new_len,), -100, dtype=labels_tensor.dtype)
@@ -1097,14 +1092,14 @@ def _validate_batch_video_meta(
     if num_videos <= 0:
         return
 
-    # CamDistill 和 VGGT-Direct cache 模式: 强依赖 video_id 查 cache。
-    # VGGT-Direct online 模式: 需要可用的视频路径。
-    is_vggt_online = _is_vggt_direct_model(template) and os.environ.get('VGGT_MODE', 'cache').strip().lower() == 'online'
+    # CamDistill 和 CamInject cache 模式: 强依赖 video_id 查 cache。
+    # CamInject online 模式: 需要可用的视频路径。
+    is_caminject_online = _is_caminject_model(template) and os.environ.get('VGGT_MODE', 'cache').strip().lower() == 'online'
 
-    if is_vggt_online:
+    if is_caminject_online:
         if len(batch_video_paths) != num_videos:
             raise RuntimeError(
-                f'[CamDistill/VGGT-Direct] online mode requires video_paths per video: '
+                f'[CamDistill/CamInject] online mode requires video_paths per video: '
                 f'len(video_paths)={len(batch_video_paths)} vs num_videos={num_videos}. '
                 'Check dataset video path fields and Template.encode patch.'
             )
@@ -1112,13 +1107,13 @@ def _validate_batch_video_meta(
 
     if not batch_video_ids:
         raise RuntimeError(
-            '[CamDistill/VGGT-Direct] batch contains video inputs but no video_ids were collected. '
+            '[CamDistill/CamInject] batch contains video inputs but no video_ids were collected. '
             'Check dataset video path fields and Template.encode patch.'
         )
 
     if len(batch_video_ids) != num_videos:
         raise RuntimeError(
-            f'[CamDistill/VGGT-Direct] batch video_ids count mismatch: '
+            f'[CamDistill/CamInject] batch video_ids count mismatch: '
             f'len(video_ids)={len(batch_video_ids)} vs num_videos={num_videos}. '
             'Check data path extraction and Template.encode patch.'
         )
@@ -1201,7 +1196,7 @@ def apply_video_id_patch():
             adapter = _lookup_camera_module(self, model)
             if adapter is None:
                 raise RuntimeError(
-                    '[CamDistill/VGGT-Direct] camera module missing while generation batch carries video metadata.'
+                    '[CamDistill/CamInject] camera module missing while generation batch carries video metadata.'
                 )
 
             adapter._pending_video_ids = batch_video_ids
@@ -1228,7 +1223,7 @@ def apply_video_id_patch():
             adapter = _lookup_camera_module(self, model)
             if adapter is None:
                 if batch_video_ids or batch_video_paths:
-                    raise RuntimeError('[CamDistill/VGGT-Direct] camera module missing while video metadata exists in batch.')
+                    raise RuntimeError('[CamDistill/CamInject] camera module missing while video metadata exists in batch.')
                 with _original_forward_context(self, model, inputs):
                     yield
                 return
@@ -1250,11 +1245,11 @@ def apply_video_id_patch():
         Template._data_collator_mm_data = _patched_mm_collator
         Template.forward_context = _patched_forward_context
         Template.prepare_generate_kwargs = _patched_prepare_generate_kwargs
-        print('[CamDistill/VGGT-Direct] Template encode/collator patched to propagate video_ids')
+        print('[CamDistill/CamInject] Template encode/collator patched to propagate video_ids')
 
     except (ImportError, AttributeError) as e:
-        print(f"[CamDistill/VGGT-Direct] WARNING: Could not patch Template for video_ids: {e}")
-        print('  video_ids may be missing in forward; VGGT-Direct cache loading can degrade to zeros.')
+        print(f"[CamDistill/CamInject] WARNING: Could not patch Template for video_ids: {e}")
+        print('  video_ids may be missing in forward; CamInject cache loading can degrade to zeros.')
 
 
 # 自动应用 patch (插件加载时)
@@ -1264,5 +1259,5 @@ apply_video_id_patch()
 print("[CamDistill] Plugin loaded. Model types:")
 print("  - qwen3_vl_camdistill   (camera token 蒸馏)")
 print("  - qwen3_5_camdistill    (camera token 蒸馏)")
-print("  - qwen3_vl_vggt_direct  (VGGT 直接注入)")
-print("  - qwen3_5_vggt_direct   (VGGT 直接注入)")
+print("  - qwen3_vl_caminject   (VGGT 直接注入)")
+print("  - qwen3_5_caminject    (VGGT 直接注入)")

@@ -13,19 +13,17 @@ export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${L
 # 用法:
 #   bash camera_movement_sft/train_camdistill.sh <model_name>
 #
-#   model_name: qwen3vl-4b, qwen3vl-8b
+#   model_name: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b
 #
 # 环境变量:
 #   VGGT_CACHE_DIR    — VGGT 预提取特征缓存目录（必需）
-#   CAMDISTILL_LAMBDA — 蒸馏 loss 权重（默认 0.3）
+#   CAMDISTILL_LAMBDA — 蒸馏 loss 权重（常数, 默认 0.3）
+#   CAMDISTILL_WARMUP_STEPS — 前多少步关闭蒸馏（默认 200）
 #   CAMDISTILL_DEPTH  — Camera Token Module 层数（默认 6）
 #   CAMDISTILL_EXTRACT_LAYERS — 显式指定抽取的 ViT 层索引，逗号分隔；长度必须等于 CAMDISTILL_DEPTH
-#   CAMDISTILL_DISTILL_ONLY — 是否只用蒸馏 loss（默认 0；stage1 会自动置为 1）
-#   CAMDISTILL_TRAIN_STAGE — 训练阶段: single|stage1|stage2（默认 single）
-#   CAMDISTILL_STAGE2_RESUME_FROM — stage2 时可选，显式指定 stage1 checkpoint 路径
-#   CAMDISTILL_STAGE1_OUTPUT_DIR  — stage1 输出目录（可选）
-#   CAMDISTILL_STAGE2_OUTPUT_DIR  — stage2 输出目录（可选）
-#   CAMERA_TOKEN_INSERT_POSITION  — camera token 插入位置: front|back（默认 front）
+#   CAMDISTILL_PER_HALF — 1=按 concat 两半分别算 cosine 再平均(默认), 0=整段计算
+#   CAMDISTILL_STRICT_CACHE — 1=cache miss/损坏直接 raise（默认 1）
+#   CAMERA_TOKEN_INSERT_POSITION — camera token 插入位置: front|back（默认 front）
 #
 # 示例:
 #   VGGT_CACHE_DIR=/path/to/vggt_cache \
@@ -88,33 +86,13 @@ esac
 # ================================
 # CamDistill 配置
 # ================================
-# 记录是否由用户显式传入 warmup，stage1 下若未显式传入则自动改为 0（避免蒸馏被 warmup 关掉）
-_HAS_USER_WARMUP_STEPS=0
-if [ -n "${CAMDISTILL_WARMUP_STEPS+x}" ]; then
-    _HAS_USER_WARMUP_STEPS=1
-fi
-
 export VGGT_CACHE_DIR="${VGGT_CACHE_DIR:?请设置 VGGT_CACHE_DIR 环境变量指向预提取缓存目录}"
 export CAMDISTILL_LAMBDA="${CAMDISTILL_LAMBDA:-0.3}"
 export CAMDISTILL_DEPTH="${CAMDISTILL_DEPTH:-6}"
 export CAMDISTILL_EXTRACT_LAYERS="${CAMDISTILL_EXTRACT_LAYERS:-}"
 export CAMDISTILL_WARMUP_STEPS="${CAMDISTILL_WARMUP_STEPS:-200}"
-export CAMDISTILL_METRIC="${CAMDISTILL_METRIC:-cos_mag}"   # cosine | mse | smooth_l1 | cos_mag(方向+模长, 默认)
-export CAMDISTILL_MAG_WEIGHT="${CAMDISTILL_MAG_WEIGHT:-0.5}"  # cos_mag 里模长项权重
-export CAMDISTILL_PER_HALF="${CAMDISTILL_PER_HALF:-1}"    # 1=按 concat 两半分别算度量再平均(默认), 0=整段计算
-# 蒸馏权重调度: const(默认, 用 CAMDISTILL_LAMBDA) | linear_decay(从 START 线性衰减到 END)
-export CAMDISTILL_LAMBDA_SCHEDULE="${CAMDISTILL_LAMBDA_SCHEDULE:-const}"
-export CAMDISTILL_LAMBDA_START="${CAMDISTILL_LAMBDA_START:-1.0}"
-export CAMDISTILL_LAMBDA_END="${CAMDISTILL_LAMBDA_END:-0.05}"
-# SFT loss 对"答案值 token"(type/direction/speed/时间/special 值)提权
-# 默认关闭：仅在显式设置 CAMERA_VALUE_LOSS_W 时开启
-# 可选 CAMERA_LOSS_SCALE 覆盖策略名（默认 camera_value，设置 none 可关闭）
+export CAMDISTILL_PER_HALF="${CAMDISTILL_PER_HALF:-1}"    # 1=按 concat 两半分别算 cosine 再平均(默认), 0=整段计算
 export VGGT_TEACHER_TYPE="${VGGT_TEACHER_TYPE:-vggt}"  # "vggt" 或 "vggt_omega"
-export CAMDISTILL_DISTILL_ONLY="${CAMDISTILL_DISTILL_ONLY:-0}"
-export CAMDISTILL_TRAIN_STAGE="${CAMDISTILL_TRAIN_STAGE:-single}"  # single | stage1 | stage2
-export CAMDISTILL_STAGE2_RESUME_FROM="${CAMDISTILL_STAGE2_RESUME_FROM:-}"
-export CAMDISTILL_STAGE1_OUTPUT_DIR="${CAMDISTILL_STAGE1_OUTPUT_DIR:-}"
-export CAMDISTILL_STAGE2_OUTPUT_DIR="${CAMDISTILL_STAGE2_OUTPUT_DIR:-}"
 export CAMERA_TOKEN_INSERT_POSITION="${CAMERA_TOKEN_INSERT_POSITION:-front}"
 
 if [ "${CAMERA_TOKEN_INSERT_POSITION}" != "front" ] && [ "${CAMERA_TOKEN_INSERT_POSITION}" != "back" ]; then
@@ -138,72 +116,7 @@ cd "${PROJECT_ROOT}"
 TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/camera_movement_train_diverse_50k_en.jsonl}"
 
 # 输出目录
-BASE_OUTPUT_DIR="${OUTPUT_DIR:-output/camera_sft_${MODEL_SHORT}}"
-
-_find_latest_checkpoint() {
-    local stage_root="$1"
-    local latest_run=""
-    local latest_ckpt=""
-
-    if [ -z "${stage_root}" ] || [ ! -d "${stage_root}" ]; then
-        echo ""
-        return
-    fi
-
-    latest_run="$(ls -1dt "${stage_root}"/v* 2>/dev/null | head -n 1 || true)"
-    if [ -z "${latest_run}" ]; then
-        latest_run="${stage_root}"
-    fi
-
-    latest_ckpt="$(ls -1d "${latest_run}"/checkpoint-* 2>/dev/null | sort -V | tail -n 1 || true)"
-    echo "${latest_ckpt}"
-}
-
-FREEZE_LLM="false"
-RESUME_CKPT=""
-RESUME_ONLY_MODEL="false"
-
-case "${CAMDISTILL_TRAIN_STAGE}" in
-    single)
-        OUTPUT_DIR="${BASE_OUTPUT_DIR}"
-        ;;
-    stage1)
-        FREEZE_LLM="true"
-        OUTPUT_DIR="${CAMDISTILL_STAGE1_OUTPUT_DIR:-${BASE_OUTPUT_DIR}_stage1}"
-        export CAMDISTILL_DISTILL_ONLY="1"
-        if [ "${_HAS_USER_WARMUP_STEPS}" = "0" ]; then
-            export CAMDISTILL_WARMUP_STEPS="0"
-        fi
-        ;;
-    stage2)
-        FREEZE_LLM="false"
-        RESUME_ONLY_MODEL="true"
-        OUTPUT_DIR="${CAMDISTILL_STAGE2_OUTPUT_DIR:-${BASE_OUTPUT_DIR}_stage2}"
-        # 第二阶段保持原始 CamDistill 训练形态：SFT + Distill
-        export CAMDISTILL_DISTILL_ONLY="0"
-
-        RESUME_CKPT="${CAMDISTILL_STAGE2_RESUME_FROM}"
-        if [ -z "${RESUME_CKPT}" ]; then
-            STAGE1_DIR="${CAMDISTILL_STAGE1_OUTPUT_DIR:-${BASE_OUTPUT_DIR}_stage1}"
-            RESUME_CKPT="$(_find_latest_checkpoint "${STAGE1_DIR}")"
-        fi
-
-        if [ -z "${RESUME_CKPT}" ]; then
-            echo "错误: stage2 未找到可用 checkpoint。"
-            echo "请设置 CAMDISTILL_STAGE2_RESUME_FROM=/path/to/checkpoint-xxxx"
-            exit 1
-        fi
-        if [ ! -d "${RESUME_CKPT}" ]; then
-            echo "错误: stage2 resume checkpoint 不存在: ${RESUME_CKPT}"
-            exit 1
-        fi
-        ;;
-    *)
-        echo "错误: 不支持的 CAMDISTILL_TRAIN_STAGE=${CAMDISTILL_TRAIN_STAGE}"
-        echo "支持: single | stage1 | stage2"
-        exit 1
-        ;;
-esac
+OUTPUT_DIR="${OUTPUT_DIR:-output/camera_sft_${MODEL_SHORT}}"
 
 # ================================
 # 网络代理配置
@@ -256,26 +169,17 @@ echo "============================================"
 echo "CamDistill 训练 (Camera Token Distillation)"
 echo "============================================"
 echo "模型:           ${MODEL}"
-echo "训练阶段:       ${CAMDISTILL_TRAIN_STAGE}"
-echo "冻结LLM:        ${FREEZE_LLM}"
 echo "Plugin:         ${PLUGIN_PATH}"
 echo "VGGT Cache:     ${VGGT_CACHE_DIR}"
 echo "蒸馏权重:       ${CAMDISTILL_LAMBDA}"
 echo "CamDistill层数: ${CAMDISTILL_DEPTH}"
 echo "抽取层索引:     ${CAMDISTILL_EXTRACT_LAYERS:-<auto>}"
 echo "蒸馏预热步数:   ${CAMDISTILL_WARMUP_STEPS}"
-echo "蒸馏度量:       ${CAMDISTILL_METRIC}"
-echo "模长权重:       ${CAMDISTILL_MAG_WEIGHT}"
 echo "按半计算:       ${CAMDISTILL_PER_HALF}"
-echo "λ 调度:         ${CAMDISTILL_LAMBDA_SCHEDULE} (start=${CAMDISTILL_LAMBDA_START} end=${CAMDISTILL_LAMBDA_END})"
-echo "仅蒸馏Loss:      ${CAMDISTILL_DISTILL_ONLY}"
 echo "Camera位置:     ${CAMERA_TOKEN_INSERT_POSITION}"
 echo "Strict Cache:   ${CAMDISTILL_STRICT_CACHE}"
 echo "数据:           ${TRAIN_DATA}"
 echo "输出:           ${OUTPUT_DIR}"
-if [ "${CAMDISTILL_TRAIN_STAGE}" = "stage2" ]; then
-    echo "Resume Ckpt:    ${RESUME_CKPT}"
-fi
 echo "GPU 数量:       ${NPROC_PER_NODE}"
 echo "有效 Batch:     $((NPROC_PER_NODE * PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION))"
 echo "============================================"
@@ -294,22 +198,6 @@ if [ ! -d "${VGGT_CACHE_DIR}" ]; then
     exit 1
 fi
 
-RESUME_ARGS=""
-if [ "${CAMDISTILL_TRAIN_STAGE}" = "stage2" ]; then
-    RESUME_ARGS="--resume_from_checkpoint ${RESUME_CKPT} --resume_only_model ${RESUME_ONLY_MODEL}"
-fi
-
-# SFT loss 加权 (答案值 token 提权)
-# 默认关闭：仅在显式设置 CAMERA_VALUE_LOSS_W 时开启
-LOSS_SCALE_ARGS=""
-if [ -n "${CAMERA_VALUE_LOSS_W+x}" ]; then
-    CAMERA_LOSS_SCALE_NAME="${CAMERA_LOSS_SCALE:-camera_value}"
-    if [ -n "${CAMERA_LOSS_SCALE_NAME}" ] && [ "${CAMERA_LOSS_SCALE_NAME}" != "none" ]; then
-        LOSS_SCALE_ARGS="--loss_scale ${CAMERA_LOSS_SCALE_NAME}"
-        echo "SFT loss 加权:   ${CAMERA_LOSS_SCALE_NAME} (值 token W=${CAMERA_VALUE_LOSS_W})"
-    fi
-fi
-
 # ================================
 # 开始训练
 # ================================
@@ -317,15 +205,12 @@ swift sft \
     --model "${MODEL}" \
     --model_type "${MODEL_TYPE}" \
     --use_hf true \
-    ${RESUME_ARGS} \
     --external_plugins "${PLUGIN_PATH}" \
     --loss_type camdistill \
-    ${LOSS_SCALE_ARGS} \
     --dataset "${TRAIN_DATA}" \
     --split_dataset_ratio 0.05 \
     --tuner_type full \
     --torch_dtype bfloat16 \
-    --freeze_llm ${FREEZE_LLM} \
     --freeze_vit true \
     --freeze_aligner true \
     --deepspeed "${DEEPSPEED_STAGE}" \

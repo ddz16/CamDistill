@@ -298,7 +298,7 @@ camera_movement_sft/train_data/
               │
 原始模型 ────┤─── CamDistill SFT ─── GRPO ──── CamDistill + GRPO
               │
-              └─── VGGT-Direct SFT ── GRPO ──── VGGT-Direct + GRPO
+              └─── CamInject SFT ── GRPO ──── CamInject + GRPO
 ```
 
 所有 SFT 变体都可以接 GRPO。只需将对应的 checkpoint 路径传给 `train_grpo.sh`。

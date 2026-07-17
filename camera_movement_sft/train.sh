@@ -193,18 +193,6 @@ if [ "${RESUME}" = "true" ]; then
     RESUME_ARGS="--resume_from_checkpoint ${RESUME_CKPT} --add_version false"
 fi
 
-# SFT loss 对"答案值 token"(type/direction/speed/时间/special 值)提权
-# 默认关闭：仅在显式设置 CAMERA_VALUE_LOSS_W 时开启
-LOSS_SCALE_ARGS=""
-if [ -n "${CAMERA_VALUE_LOSS_W+x}" ]; then
-    CAMERA_LOSS_SCALE_NAME="${CAMERA_LOSS_SCALE:-camera_value}"
-    if [ -n "${CAMERA_LOSS_SCALE_NAME}" ] && [ "${CAMERA_LOSS_SCALE_NAME}" != "none" ]; then
-        # 纯 SFT 需显式加载插件来注册 camera_value
-        LOSS_SCALE_ARGS="--external_plugins ${SCRIPT_DIR}/plugins/camera_loss_scale.py --loss_scale ${CAMERA_LOSS_SCALE_NAME}"
-        echo "SFT loss 加权:   ${CAMERA_LOSS_SCALE_NAME} (值 token W=${CAMERA_VALUE_LOSS_W})"
-    fi
-fi
-
 # ================================
 # 开始训练
 # ================================
@@ -212,7 +200,6 @@ swift sft \
     --model "${MODEL}" \
     --use_hf true \
     ${RESUME_ARGS} \
-    ${LOSS_SCALE_ARGS} \
     --dataset "${TRAIN_DATA}" \
     --split_dataset_ratio 0.05 \
     --tuner_type full \

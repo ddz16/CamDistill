@@ -1804,7 +1804,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
             video_embeds = video_outputs.pooler_output
             video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
 
-            # === CamDistill / VGGT-Direct: 注入 camera tokens ===
+            # === CamDistill / CamInject: 注入 camera tokens ===
             camdistill_module = getattr(self, '_camdistill_module', None)
             vit_intermediates = getattr(self.visual, '_camdistill_layer_cache', [])
             _camdistill_mode = getattr(self, '_camdistill_mode', 'learn')  # 'learn' or 'direct'

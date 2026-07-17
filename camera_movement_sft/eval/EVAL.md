@@ -36,7 +36,7 @@ bash camera_movement_sft/eval/benchmarks/run_benchmarks.sh cam-motion-72b
 
 # 自家训练的 checkpoint（绝对路径）
 bash camera_movement_sft/eval/benchmarks/run_benchmarks.sh \
-    /group/40009/dazhaodu/ms-swift/output/camera_sft_qwen3vl_4b_vggt_direct/v23-20260627-023518/checkpoint-1260
+    /group/40009/dazhaodu/ms-swift/output/camera_sft_qwen3vl_4b_caminject/v23-20260627-023518/checkpoint-1260
 ```
 
 结果落到：`camera_movement_sft/eval/benchmarks/results/<TAG>/{camerabench,multicam}/`。

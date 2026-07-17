@@ -3,7 +3,7 @@ export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # 默�
 export LD_LIBRARY_PATH="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib:${LD_LIBRARY_PATH}"
 export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${LD_PRELOAD:+:$LD_PRELOAD}"
 # ============================================================================
-# VGGT-Direct Baseline 训练脚本
+# CamInject Baseline 训练脚本
 # ============================================================================
 # 直接使用 VGGT 冻结输出的 camera token 注入 LLM，不做蒸馏。
 # 支持两种特征来源模式：
@@ -16,17 +16,17 @@ export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${L
 # 用法:
 #   # 离线 cache 模式（默认）
 #   VGGT_MODE=cache VGGT_CACHE_DIR=/path/to/cache \
-#   bash camera_movement_sft/train_vggt_direct.sh qwen3vl-8b
+#   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
 #   # 在线提取模式（无需预提取）
 #   VGGT_MODE=online VGGT_TEACHER_TYPE=vggt_omega \
 #   VGGT_MODEL_PATH=/group/40009/dazhaodu/vggt-omega/checkpoints/vggt_omega_1b_512.pt \
-#   bash camera_movement_sft/train_vggt_direct.sh qwen3vl-8b
+#   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
 #   # 指定 camera token 插入到每帧 visual tokens 末尾
 #   CAMERA_TOKEN_INSERT_POSITION=back \
 #   VGGT_MODE=cache VGGT_CACHE_DIR=/path/to/cache \
-#   bash camera_movement_sft/train_vggt_direct.sh qwen3vl-8b
+#   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
 # 支持模型: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b
 # ============================================================================
@@ -43,8 +43,8 @@ MODEL_NAME="${1:-qwen3vl-8b}"
 case "${MODEL_NAME}" in
     qwen3vl-4b|qwen3-vl-4b)
         MODEL="Qwen/Qwen3-VL-4B-Instruct"
-        MODEL_TYPE="qwen3_vl_vggt_direct"
-        MODEL_SHORT="qwen3vl_4b_vggt_direct"
+        MODEL_TYPE="qwen3_vl_caminject"
+        MODEL_SHORT="qwen3vl_4b_caminject"
         PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
         GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-4}
         LEARNING_RATE=${LEARNING_RATE:-2e-5}
@@ -52,8 +52,8 @@ case "${MODEL_NAME}" in
         ;;
     qwen3vl-8b|qwen3-vl-8b)
         MODEL="Qwen/Qwen3-VL-8B-Instruct"
-        MODEL_TYPE="qwen3_vl_vggt_direct"
-        MODEL_SHORT="qwen3vl_8b_vggt_direct"
+        MODEL_TYPE="qwen3_vl_caminject"
+        MODEL_SHORT="qwen3vl_8b_caminject"
         PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
         GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-4}
         LEARNING_RATE=${LEARNING_RATE:-1.5e-5}
@@ -61,8 +61,8 @@ case "${MODEL_NAME}" in
         ;;
     qwen35-4b|qwen3.5-4b)
         MODEL="Qwen/Qwen3.5-4B"
-        MODEL_TYPE="qwen3_5_vggt_direct"
-        MODEL_SHORT="qwen35_4b_vggt_direct"
+        MODEL_TYPE="qwen3_5_caminject"
+        MODEL_SHORT="qwen35_4b_caminject"
         PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
         GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-4}
         LEARNING_RATE=${LEARNING_RATE:-2e-5}
@@ -70,8 +70,8 @@ case "${MODEL_NAME}" in
         ;;
     qwen35-9b|qwen3.5-9b)
         MODEL="Qwen/Qwen3.5-9B"
-        MODEL_TYPE="qwen3_5_vggt_direct"
-        MODEL_SHORT="qwen35_9b_vggt_direct"
+        MODEL_TYPE="qwen3_5_caminject"
+        MODEL_SHORT="qwen35_9b_caminject"
         PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
         GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-4}
         LEARNING_RATE=${LEARNING_RATE:-1.5e-5}
@@ -112,16 +112,13 @@ else
     exit 1
 fi
 
-# VGGT-Direct fail-fast 配置（避免 silent fallback 到零特征）
-export VGGT_DIRECT_STRICT_IDS="${VGGT_DIRECT_STRICT_IDS:-1}"
-export VGGT_DIRECT_STRICT_CACHE="${VGGT_DIRECT_STRICT_CACHE:-1}"
-export VGGT_DIRECT_MAX_MISS_RATIO="${VGGT_DIRECT_MAX_MISS_RATIO:-0.0}"
-export VGGT_DIRECT_MIN_RATIO_SAMPLES="${VGGT_DIRECT_MIN_RATIO_SAMPLES:-32}"
-export VGGT_DIRECT_LOG_EVERY="${VGGT_DIRECT_LOG_EVERY:-50}"
+# CamInject fail-fast 配置（避免 silent fallback 到零特征）
+export CAMINJECT_STRICT_IDS="${CAMINJECT_STRICT_IDS:-1}"
+export CAMINJECT_STRICT_CACHE="${CAMINJECT_STRICT_CACHE:-1}"
+export CAMINJECT_MAX_MISS_RATIO="${CAMINJECT_MAX_MISS_RATIO:-0.0}"
+export CAMINJECT_MIN_RATIO_SAMPLES="${CAMINJECT_MIN_RATIO_SAMPLES:-32}"
+export CAMINJECT_LOG_EVERY="${CAMINJECT_LOG_EVERY:-50}"
 export CAMERA_TOKEN_INSERT_POSITION="${CAMERA_TOKEN_INSERT_POSITION:-front}"
-# SFT loss 对"答案值 token"提权
-# 默认关闭：仅在显式设置 CAMERA_VALUE_LOSS_W 时开启
-# 可选 CAMERA_LOSS_SCALE 覆盖策略名（默认 camera_value，设置 none 可关闭）
 
 if [ "${CAMERA_TOKEN_INSERT_POSITION}" != "front" ] && [ "${CAMERA_TOKEN_INSERT_POSITION}" != "back" ]; then
     echo "错误: CAMERA_TOKEN_INSERT_POSITION 仅支持 front 或 back，当前值: ${CAMERA_TOKEN_INSERT_POSITION}"
@@ -186,7 +183,7 @@ MAX_LENGTH="${MAX_LENGTH:-16384}"
 # 打印训练信息
 # ================================
 echo "============================================"
-echo "VGGT-Direct Baseline 训练"
+echo "CamInject Baseline 训练"
 echo "============================================"
 echo "模型:           ${MODEL} (${MODEL_TYPE})"
 echo "VGGT:           ${VGGT_MODEL_PATH} (mode=${VGGT_MODE})"
@@ -194,9 +191,9 @@ echo "VGGT Teacher:   ${VGGT_TEACHER_TYPE}"
 echo "VGGT Cache:     ${VGGT_CACHE_DIR:-<disabled>}"
 echo "Online FPS:     ${VGGT_ONLINE_FPS}"
 echo "Online MaxFrm:  ${VGGT_ONLINE_MAX_FRAMES}"
-echo "Strict IDs:     ${VGGT_DIRECT_STRICT_IDS}"
-echo "Strict Cache:   ${VGGT_DIRECT_STRICT_CACHE}"
-echo "Max Miss Ratio: ${VGGT_DIRECT_MAX_MISS_RATIO}"
+echo "Strict IDs:     ${CAMINJECT_STRICT_IDS}"
+echo "Strict Cache:   ${CAMINJECT_STRICT_CACHE}"
+echo "Max Miss Ratio: ${CAMINJECT_MAX_MISS_RATIO}"
 echo "Camera位置:     ${CAMERA_TOKEN_INSERT_POSITION}"
 echo "数据:           ${TRAIN_DATA}"
 echo "输出:           ${OUTPUT_DIR}"
@@ -221,22 +218,10 @@ fi
 # 开始训练 (标准 SFT)
 # ================================
 
-# SFT loss 加权 (答案值 token 提权)
-# 默认关闭：仅在显式设置 CAMERA_VALUE_LOSS_W 时开启
-LOSS_SCALE_ARGS=""
-if [ -n "${CAMERA_VALUE_LOSS_W+x}" ]; then
-    CAMERA_LOSS_SCALE_NAME="${CAMERA_LOSS_SCALE:-camera_value}"
-    if [ -n "${CAMERA_LOSS_SCALE_NAME}" ] && [ "${CAMERA_LOSS_SCALE_NAME}" != "none" ]; then
-        LOSS_SCALE_ARGS="--loss_scale ${CAMERA_LOSS_SCALE_NAME}"
-        echo "SFT loss 加权: ${CAMERA_LOSS_SCALE_NAME} (值 token W=${CAMERA_VALUE_LOSS_W})"
-    fi
-fi
-
 swift sft \
     --model "${MODEL}" \
     --model_type "${MODEL_TYPE}" \
     --use_hf true \
-    ${LOSS_SCALE_ARGS} \
     --external_plugins "${PLUGIN_PATH}" \
     --dataset "${TRAIN_DATA}" \
     --split_dataset_ratio 0.05 \
@@ -270,7 +255,7 @@ swift sft \
     --report_to wandb
 
 echo "============================================"
-echo "VGGT-Direct 训练完成！"
+echo "CamInject 训练完成！"
 echo "输出目录: ${OUTPUT_DIR}"
 echo "============================================"
 

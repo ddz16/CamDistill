@@ -5,7 +5,7 @@ CamDistill Loss: Camera Token 蒸馏损失函数
 通过 --loss_type camdistill 激活。
 
 VGGT 缓存: 每个视频一个 {video_id}.pt 文件, 内容为 dict:
-  {"camera_features": Tensor(S, 2048) float16, "pose_enc": Tensor(S, 9) float32 (可选)}
+  {"camera_features": Tensor(S, 2048) float16}
 """
 
 import os
@@ -15,13 +15,12 @@ from typing import List, Optional
 
 from swift.loss import BaseLoss, loss_map
 
-
 class CamDistillLoss(BaseLoss):
     """
     CamDistill 训练 Loss = L_sft + lambda_cam * L_distill
 
-    L_sft: 标准 next-token prediction cross-entropy
-    L_distill: Camera Token 与 VGGT target 的余弦相似度 loss
+    L_sft:     标准 next-token prediction cross-entropy
+    L_distill: Camera Token 与 VGGT target 的余弦相似度 loss (1 - cos_sim)
     """
 
     def __init__(self, args=None, trainer=None):
@@ -30,74 +29,34 @@ class CamDistillLoss(BaseLoss):
         else:
             super().__init__()
 
+        # 蒸馏权重 (常数): total_loss = sft_loss + lambda_cam * distill_loss
         self.lambda_cam = float(os.environ.get("CAMDISTILL_LAMBDA", "0.3"))
-        # 前几步关闭蒸馏，先让LM/SFT稳定（避免初期蒸馏梯度主导导致不收敛）
+        # 前几步关闭蒸馏，先让 LM/SFT 稳定（避免初期蒸馏梯度主导导致不收敛）
         self.lambda_warmup_steps = int(os.environ.get("CAMDISTILL_WARMUP_STEPS", "200"))
-        # 蒸馏权重调度: const(默认) | linear_decay(从 START 线性衰减到 END)
-        #   linear_decay 思路: 前期强力(START)把 camera 支路拉进 VGGT 几何 basin,
-        #   后期衰减(END)让 SFT/任务主导, 避免收尾阶段蒸馏与任务打架。
-        self.lambda_schedule = os.environ.get("CAMDISTILL_LAMBDA_SCHEDULE", "const").strip().lower()
-        if self.lambda_schedule not in {"const", "linear_decay"}:
-            raise RuntimeError(
-                f"[CamDistillLoss] unsupported CAMDISTILL_LAMBDA_SCHEDULE={self.lambda_schedule}, "
-                "expected one of: const, linear_decay"
-            )
-        self.lambda_start = float(os.environ.get("CAMDISTILL_LAMBDA_START", str(self.lambda_cam)))
-        self.lambda_end = float(os.environ.get("CAMDISTILL_LAMBDA_END", "0.05"))
-        self.distill_metric = os.environ.get("CAMDISTILL_METRIC", "cos_mag").strip().lower()
-        if self.distill_metric not in {"cosine", "mse", "smooth_l1", "cos_mag"}:
-            raise RuntimeError(
-                f"[CamDistillLoss] unsupported CAMDISTILL_METRIC={self.distill_metric}, "
-                "expected one of: cosine, mse, smooth_l1, cos_mag"
-            )
-        # cos_mag: 方向(cosine) + 模长(log-空间相对误差) 组合, 模长项权重
-        self.mag_weight = float(os.environ.get("CAMDISTILL_MAG_WEIGHT", "0.5"))
-        # per_half: camera_features 是 [帧内半 ; 帧间半] concat, 按半各算度量再平均 (默认开),
+
+        # per_half: camera_features 是 [帧内半 ; 帧间半] concat, 按半各算 cosine 再平均 (默认开),
         #   对齐 VGGT 的两段结构, 避免整段归一化时被范数大的一半主导。
-        #   置 0 则对整段 (2048) 整体计算。对 mse/smooth_l1 是等价 no-op, 只影响 cosine/cos_mag。
+        #   置 0 则对整段 (2048) 整体计算。
         self.per_half = os.environ.get("CAMDISTILL_PER_HALF", "1").strip().lower() in {'1', 'true', 'yes', 'on'}
         self.vggt_cache_dir = os.environ.get("VGGT_CACHE_DIR", "")
         self.strict_cache = os.environ.get('CAMDISTILL_STRICT_CACHE', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
-        self.distill_only = os.environ.get('CAMDISTILL_DISTILL_ONLY', '0').strip().lower() in {
-            '1', 'true', 'yes', 'on'
-        }
 
     def _metric_once(
         self,
         pred_aligned: torch.Tensor,
         target: torch.Tensor,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """在给定的 (N, D) 向量对上算一次度量。per_half 时会分别对两半调用。"""
-        if self.distill_metric == "cosine":
-            pred_norm = F.normalize(pred_aligned, dim=-1)
-            target_norm = F.normalize(target, dim=-1)
-            cos_sim = (pred_norm * target_norm).sum(dim=-1)
-            return (1 - cos_sim).mean(), cos_sim.mean()
-        if self.distill_metric == "mse":
-            return F.mse_loss(pred_aligned, target), None
-        if self.distill_metric == "smooth_l1":
-            return F.smooth_l1_loss(pred_aligned, target, beta=1.0), None
-        # cos_mag: 方向用 cosine, 模长用 log-空间相对误差 (尺度不变, 稳定)
-        #   L = (1 - cos) + mag_weight * smooth_l1(log||pred||, log||target||)
-        # cosine 负责方向 (几何朝向), 模长项补回 cosine 丢弃的运动幅度信息。
-        eps = 1e-6
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """在给定的 (N, D) 向量对上算一次 cosine loss = 1 - cos_sim."""
         pred_norm = F.normalize(pred_aligned, dim=-1)
         target_norm = F.normalize(target, dim=-1)
         cos_sim = (pred_norm * target_norm).sum(dim=-1)
-        dir_loss = (1 - cos_sim).mean()
-
-        pred_mag = torch.linalg.vector_norm(pred_aligned, dim=-1)
-        target_mag = torch.linalg.vector_norm(target, dim=-1)
-        mag_loss = F.smooth_l1_loss(
-            torch.log(pred_mag + eps), torch.log(target_mag + eps), beta=1.0
-        )
-        return dir_loss + self.mag_weight * mag_loss, cos_sim.mean()
+        return (1 - cos_sim).mean(), cos_sim.mean()
 
     def _compute_distill_loss(
         self,
         pred_aligned: torch.Tensor,
         target: torch.Tensor,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.per_half:
             return self._metric_once(pred_aligned, target)
 
@@ -112,9 +71,7 @@ class CamDistillLoss(BaseLoss):
         loss_a, cos_a = self._metric_once(pred_aligned[..., :h], target[..., :h])
         loss_b, cos_b = self._metric_once(pred_aligned[..., h:], target[..., h:])
         loss = 0.5 * (loss_a + loss_b)
-        cos_sim = None
-        if cos_a is not None and cos_b is not None:
-            cos_sim = 0.5 * (cos_a + cos_b)
+        cos_sim = 0.5 * (cos_a + cos_b)
         return loss, cos_sim
 
     @staticmethod
@@ -203,7 +160,8 @@ class CamDistillLoss(BaseLoss):
 
         return features.to(device)
 
-    def __call__(        self,
+    def __call__(
+        self,
         outputs,
         labels,
         *,
@@ -229,45 +187,28 @@ class CamDistillLoss(BaseLoss):
         if num_items_in_batch is None:
             num_items_in_batch = (shift_labels != -100).sum().clamp(min=1)
 
-        if loss_scale is not None:
-            # 逐 token 加权 CE: loss_scale 给"答案值 token"提权(camera_value)。
-            # loss_scale 与 labels 对齐(camdistill 在 encode 阶段已随 camera token 一起扩展),
-            # 故取 [..., 1:] 与 shift_labels 对齐。
-            ce = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-            )  # (B*(S-1),)
-            ls = loss_scale[..., 1:].reshape(-1).to(device=ce.device, dtype=ce.dtype)
-            sft_loss = (ce * ls).sum() / num_items_in_batch
-        else:
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
-            sft_loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-            ) / num_items_in_batch
+        loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
+        sft_loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        ) / num_items_in_batch
 
         # ===== 2. Camera Token 蒸馏 Loss =====
         global_step = int(getattr(getattr(trainer, 'state', None), 'global_step', 0) or 0)
-        max_steps = int(getattr(getattr(trainer, 'state', None), 'max_steps', 0) or 0)
         if self.lambda_warmup_steps > 0 and global_step < self.lambda_warmup_steps:
             lambda_scale = 0.0
-        elif self.lambda_schedule == "linear_decay" and max_steps > 0:
-            # 在 [warmup, max_steps] 上从 lambda_start 线性衰减到 lambda_end
-            w = self.lambda_warmup_steps
-            progress = (global_step - w) / max(1, max_steps - w)
-            progress = min(1.0, max(0.0, progress))
-            lambda_scale = self.lambda_start + (self.lambda_end - self.lambda_start) * progress
         else:
             lambda_scale = self.lambda_cam
 
         distill_loss = torch.tensor(0.0, device=sft_loss.device)
         has_distill = False
+        cos_sim_mean = None
 
-        # camera 模块: CamDistill 挂在 model.camdistill, VGGT-Direct 挂在 model.vggt_direct_adapter
+        # camera 模块: CamDistill 挂在 model.camdistill, CamInject 挂在 model.caminject_adapter
         camera_module = None
         if trainer is not None:
             camera_module = getattr(trainer.model, "camdistill", None) or \
-                getattr(trainer.model, "vggt_direct_adapter", None)
+                getattr(trainer.model, "caminject_adapter", None)
 
         if camera_module is not None:
             camdistill = camera_module
@@ -312,14 +253,7 @@ class CamDistillLoss(BaseLoss):
                     has_distill = True
 
         # ===== 3. 总 Loss =====
-        if self.distill_only:
-            if not has_distill:
-                raise RuntimeError(
-                    '[CamDistillLoss] CAMDISTILL_DISTILL_ONLY=1 but distill loss is unavailable for this batch'
-                )
-            total_loss = lambda_scale * distill_loss
-        else:
-            total_loss = sft_loss + lambda_scale * distill_loss
+        total_loss = sft_loss + lambda_scale * distill_loss
 
         # ===== 4. 日志 =====
         if trainer is not None and hasattr(trainer, "custom_metrics"):
@@ -332,12 +266,8 @@ class CamDistillLoss(BaseLoss):
             trainer.custom_metrics[mode]["distill_lambda"].update(
                 torch.tensor(float(lambda_scale), device=sft_loss.device)
             )
-            trainer.custom_metrics[mode]["distill_only"].update(
-                torch.tensor(1.0 if self.distill_only else 0.0, device=sft_loss.device)
-            )
 
         return total_loss
-
 
 # 注册到 ms-swift loss_map
 loss_map["camdistill"] = CamDistillLoss

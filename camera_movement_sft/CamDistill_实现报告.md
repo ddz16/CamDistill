@@ -779,7 +779,7 @@ L_total = L_sft + 0.3 × L_distill
 | LLM (可训练) | 36层 Decoder + lm_head | ~8B |
 | **全部可训练参数** | CamDistill + LLM | ~8.1B |
 
-### VGGT-Direct 方案
+### CamInject 方案
 
 | 组件 | 计算 | 参数量 |
 |------|------|--------|
@@ -789,7 +789,7 @@ L_total = L_sft + 0.3 × L_distill
 
 ### 各模型 CamDistill 模块实际参数量
 
-| 模型 | ViT dim | LLM dim | CamDistill 参数 | VGGT-Direct Projector |
+| 模型 | ViT dim | LLM dim | CamDistill 参数 | CamInject Projector |
 |------|---------|---------|----------------|----------------------|
 | Qwen3-VL-4B | 1024 | 2560 | 160.6M | 9.4M |
 | Qwen3-VL-8B | 1152 | 4096 | 205.8M | 12.6M |
@@ -924,7 +924,7 @@ python camera_movement_sft/plugins/vggt_feature_extractor.py \
 | 实验 | 方案 | 说明 | 目的 |
 |------|------|------|------|
 | Exp 0 | 普通 SFT | 无 Camera Token | 基线 |
-| Exp 1 | VGGT-Direct | VGGT 输出直接注入 LLM | 验证 camera token 是否有用 |
+| Exp 1 | CamInject | VGGT 输出直接注入 LLM | 验证 camera token 是否有用 |
 | Exp 2 | CamDistill (无 Global) | 仅 Frame Cross-Attn | 验证 Frame-only 蒸馏 |
 | Exp 3 | CamDistill (完整) | Frame + Global + 蒸馏 | 验证完整方案 |
 | Exp 4 | CamDistill vs Direct | 对比推理时不用/用 VGGT | 蒸馏能否达到 Direct 效果 |
@@ -938,25 +938,25 @@ python camera_movement_sft/plugins/vggt_feature_extractor.py \
 | `plugins/camdistill_plugin.py` | 新建 | 入口: register_model + register loss |
 | `plugins/camdistill_model.py` | 新建 | CameraTokenModule + Projector + Loader |
 | `plugins/camdistill_loss.py` | 新建 | BaseLoss 子类，蒸馏 loss |
-| `plugins/vggt_direct_model.py` | 新建 | VGGTDirectModule + VGGTProjector |
+| `plugins/caminject_model.py` | 新建 | CamInjectAdapter + VGGTProjector |
 | `plugins/vggt_feature_extractor.py` | 新建 | VGGT 离线预提取 |
 | `train_camdistill.sh` | 新建 | CamDistill 训练脚本 |
-| `train_vggt_direct.sh` | 新建 | VGGT-Direct 训练脚本 |
+| `train_caminject.sh` | 新建 | CamInject 训练脚本 |
 | `train.sh` | **不动** | 普通 SFT 完全不受影响 |
 | ms-swift 框架代码 | **不动** | 全部通过 external_plugins 注入 |
 | transformers 源码 | **不动** | 通过 forward hook 获取中间输出 |
 
 ---
 
-## 十二、VGGT-Direct Baseline 方案
+## 十二、CamInject Baseline 方案
 
 ### 12.1 设计思想
 
-与 CamDistill 蒸馏方案不同，VGGT-Direct 直接使用 VGGT 冻结输出的 camera token 作为 LLM 的输入，不需要训练 CameraTokenModule。
+与 CamDistill 蒸馏方案不同，CamInject 直接使用 VGGT 冻结输出的 camera token 作为 LLM 的输入，不需要训练 CameraTokenModule。
 
 **核心区别**:
 
-| | CamDistill (蒸馏) | VGGT-Direct (直接注入) |
+| | CamDistill (蒸馏) | CamInject (直接注入) |
 |---|---|---|
 | Camera Token 来源 | 自学习的 CameraTokenModule | VGGT 原始输出（冻结） |
 | 推理时需要 VGGT | **否**（模块已学会） | **是**（仍需在线推理） |
@@ -1004,11 +1004,11 @@ class VGGTProjector(nn.Module):
 ```bash
 # 与 CamDistill 共享同一个 VGGT 预提取 cache
 VGGT_CACHE_DIR=/path/to/vggt_cache \
-bash camera_movement_sft/train_vggt_direct.sh qwen3vl-8b
+bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 
 # 支持所有 4 个模型
-VGGT_CACHE_DIR=/path/to/vggt_cache bash camera_movement_sft/train_vggt_direct.sh qwen3vl-4b
-VGGT_CACHE_DIR=/path/to/vggt_cache bash camera_movement_sft/train_vggt_direct.sh qwen35-9b
+VGGT_CACHE_DIR=/path/to/vggt_cache bash camera_movement_sft/train_caminject.sh qwen3vl-4b
+VGGT_CACHE_DIR=/path/to/vggt_cache bash camera_movement_sft/train_caminject.sh qwen35-9b
 ```
 
 ### 12.6 适合场景
@@ -1025,13 +1025,13 @@ VGGT_CACHE_DIR=/path/to/vggt_cache bash camera_movement_sft/train_vggt_direct.sh
 |------|------|-----------|-----------|------|---------|
 | 普通 SFT | `train.sh` | `qwen3_vl` | LLM (~8B) | SFT | 无 |
 | CamDistill | `train_camdistill.sh` | `qwen3_vl_camdistill` | CamDistill(~200M) + LLM | SFT + Distill | 无 |
-| VGGT-Direct | `train_vggt_direct.sh` | `qwen3_vl_vggt_direct` | Projector(~10M) + LLM | SFT | VGGT |
+| CamInject | `train_caminject.sh` | `qwen3_vl_caminject` | Projector(~10M) + LLM | SFT | VGGT |
 
 ### 推荐实验顺序
 
 1. **普通 SFT** → 建立 baseline
-2. **VGGT-Direct** → 快速验证 camera token 是否有增益（最简单）
-3. **CamDistill** → 如果 VGGT-Direct 有效，尝试蒸馏去掉推理时的 VGGT 依赖
+2. **CamInject** → 快速验证 camera token 是否有增益（最简单）
+3. **CamDistill** → 如果 CamInject 有效，尝试蒸馏去掉推理时的 VGGT 依赖
 
 ---
 
@@ -1046,81 +1046,3 @@ VGGT_CACHE_DIR=/path/to/vggt_cache bash camera_movement_sft/train_vggt_direct.sh
 7. 联合训练 + 对比评测
 
 ---
-
-## 十五、Pose-Prompt Baseline（纯文本注入，无需训练）
-
-### 15.1 设计思想
-
-一种**零成本验证方案**：不修改模型、不训练，仅在推理时将 VGGT/VGGT-Omega 预测的相机位姿数字转为文本，注入 user prompt。
-
-**目的**：快速验证"相机空间信息对运镜识别是否有帮助"。如果有帮助，说明后续的 CamDistill/VGGT-Direct 方案值得做。
-
-### 15.2 架构
-
-```
-Video → VGGT/Omega (含 Camera Head) → pose_enc (S, 9)
-         ↓
-  9维 pose → 解码为: 位移(x,y,z) + 欧拉角(roll,pitch,yaw) + FoV
-         ↓
-  格式化为每帧文本描述
-         ↓
-  注入 user prompt: "<video>\n\n{pose_text}\n\n请分析这段视频的运镜..."
-         ↓
-  已训练的 SFT 模型直接推理
-```
-
-### 15.3 注入的文本格式
-
-```
-以下是由3D视觉模型估计的逐帧相机位姿信息（供参考）：
-  t=0.0s: 位移=(0.00,0.00,0.00), 旋转=(roll=0.0°,pitch=0.0°,yaw=0.0°), FoV=(57.3°,68.8°)
-  t=0.2s: 位移=(0.50,0.00,0.10), 旋转=(roll=1.1°,pitch=-0.1°,yaw=5.7°), FoV=(57.3°,68.8°)
-  t=0.4s: 位移=(1.00,0.10,0.30), 旋转=(roll=2.4°,pitch=0.9°,yaw=11.3°), FoV=(57.3°,68.8°)
-  ...
-  总位移量: 1.879
-```
-
-### 15.4 与其他方案的关系
-
-| 方案 | 信息注入方式 | 优势 | 劣势 |
-|------|-----------|------|------|
-| Pose-Prompt | **文本** (prompt 中的数字) | 零成本、即插即用 | 信息表达能力有限，受 tokenizer 和 context length 限制 |
-| VGGT-Direct | **Embedding** (2048维向量→投影→LLM) | 信息密度高 | 需要训练 projector |
-| CamDistill | **Embedding** (从 ViT 蒸馏) | 推理时不需VGGT | 需要训练整个 CamDistill 模块 |
-
-### 15.5 使用方式
-
-```bash
-# Step 1: 提取 pose（完整 VGGT pipeline，含 Camera Head）
-python camera_movement_sft/plugins/pose_prompt_baseline.py extract_pose \
-    --input_jsonl /path/to/testset.jsonl \
-    --output_dir /path/to/pose_cache/ \
-    --teacher vggt  # 或 vggt_omega
-
-# Step 2: 生成推理数据（注入 pose 文本到 prompt）
-python camera_movement_sft/plugins/pose_prompt_baseline.py generate_infer_data \
-    --input_jsonl /path/to/testset.jsonl \
-    --pose_dir /path/to/pose_cache/ \
-    --output_jsonl test_with_pose.jsonl
-
-# Step 3: 用已有 SFT checkpoint 推理
-NPROC_PER_NODE=8 swift infer \
-    --model <sft_checkpoint> \
-    --val_dataset test_with_pose.jsonl \
-    --result_path results_with_pose.jsonl \
-    --max_new_tokens 4096
-
-# Step 4: 后处理 + 评测（复用现有 pipeline）
-python camera_movement_sft/eval/postprocess_results.py ...
-python camera_movement_sft/eval/evaluate_camera_movement_fixed.py ...
-```
-
-### 15.6 关键区别：用完整 VGGT（含 Camera Head）
-
-注意 Pose-Prompt 方案与 CamDistill/VGGT-Direct **不同**——它使用 VGGT 的 **Camera Head 输出（9维 pose）**，而不是 aggregator 输出（2048维 token）：
-
-| | CamDistill / VGGT-Direct | Pose-Prompt |
-|---|---|---|
-| 使用 VGGT 哪一层 | **Aggregator 输出** (2048维 token) | **Camera Head 输出** (9维 pose) |
-| 信息类型 | 高维隐空间特征 | 人类可读的位置/旋转/焦距 |
-| 需要 Camera Head | 不需要 | **需要** |

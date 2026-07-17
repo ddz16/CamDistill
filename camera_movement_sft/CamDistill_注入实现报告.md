@@ -186,19 +186,19 @@ camdistill_plugin.py (入口)
     │   └── 外层 forward wrapper (labels 扩展)
     ├── CamDistillQwen35Loader
     │   └── 同上 → modeling_qwen3_5_camdistill.py
-    ├── VGGTDirectQwen3VLLoader
-    │   ├── 创建 VGGTDirectCameraAdapter → vggt_direct_model.py
+    ├── CamInjectQwen3VLLoader
+    │   ├── 创建 CamInjectAdapter → caminject_model.py
     │   ├── 设置 _camdistill_mode='direct'
     │   ├── Monkey-patch forward (共用注入逻辑)
     │   └── 外层 forward wrapper (video_ids pop + labels 扩展)
-    ├── VGGTDirectQwen35Loader
+    ├── CamInjectQwen35Loader
     │   └── 同上
     └── Template.encode monkey-patch (添加 video_ids 字段)
 ```
 
-## 10. VGGT-Direct 方案说明
+## 10. CamInject 方案说明
 
-VGGT-Direct 与 CamDistill **共享完全相同的 camera token 注入逻辑**:
+CamInject 与 CamDistill **共享完全相同的 camera token 注入逻辑**:
 - 使用相同的 `_inject_camera_into_video_embeds`
 - 使用相同的 `_expand_video_placeholders`
 - 使用相同的 `get_vision_position_ids` (camera 在帧中心)
@@ -206,7 +206,7 @@ VGGT-Direct 与 CamDistill **共享完全相同的 camera token 注入逻辑**:
 
 区别仅在于 camera_embeds 的来源:
 
-| | CamDistill | VGGT-Direct |
+| | CamDistill | CamInject |
 |---|---|---|
 | camera_embeds 来源 | CameraTokenModule(vit_intermediates) | VGGT_cache → VGGTProjector |
 | 需要 ViT 中间层缓存 | 是 | 否 |
@@ -216,7 +216,7 @@ VGGT-Direct 与 CamDistill **共享完全相同的 camera token 注入逻辑**:
 | Loss | SFT + distill | 仅 SFT |
 | 推理时 | 不需要 VGGT | 需要 VGGT |
 
-**VGGT-Direct 的帧数对齐**:
+**CamInject 的帧数对齐**:
 ```
 VGGT cache: (S, 2048) — S=原始帧数 (fps×duration, max=100)
 模型需要:   (T, 2048) — T=S/temporal_patch_size = S/2

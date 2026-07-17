@@ -135,43 +135,43 @@ bash camera_movement_sft/eval/run_batch_checkpoints.sh
 
   VGGT_MODE=cache \
   VGGT_CACHE_DIR=/path/to/vggt_cache \
-  bash camera_movement_sft/train_vggt_direct.sh qwen3vl-8b
+  bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 
   #### B) 训练：在线提取模式（无需预提取）
 
   VGGT_MODE=online \
   VGGT_TEACHER_TYPE=vggt_omega \
   VGGT_MODEL_PATH=/group/40009/dazhaodu/vggt-omega/checkpoints/vggt_omega_1b_512.pt \
-  bash camera_movement_sft/train_vggt_direct.sh qwen3vl-8b
+  bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 
   ———
 
   #### C) 评测：离线 cache 模式
 
-  USE_VGGT_DIRECT=1 \
+  USE_CAMINJECT=1 \
   VGGT_MODE=cache \
   VGGT_CACHE_DIR=/path/to/vggt_cache \
-  VGGT_MODEL_TYPE=qwen3_vl_vggt_direct \
-  TRAIN_OUTPUT_DIR=output/camera_sft_qwen3vl_8b_vggt_direct/v0-xxxxxx \
+  CAMINJECT_MODEL_TYPE=qwen3_vl_caminject \
+  TRAIN_OUTPUT_DIR=output/camera_sft_qwen3vl_8b_caminject/v0-xxxxxx \
   bash camera_movement_sft/eval/run_batch_checkpoints.sh
 
   #### D) 评测：在线提取模式（你要的“直接跑推理”）
 
-  USE_VGGT_DIRECT=1 \
+  USE_CAMINJECT=1 \
   VGGT_MODE=online \
   VGGT_TEACHER_TYPE=vggt_omega \
   VGGT_MODEL_PATH=/group/40009/dazhaodu/vggt-omega/checkpoints/vggt_omega_1b_512.pt \
-  VGGT_MODEL_TYPE=qwen3_vl_vggt_direct \
-  TRAIN_OUTPUT_DIR=output/camera_sft_qwen3vl_8b_vggt_direct/v0-xxxxxx \
+  CAMINJECT_MODEL_TYPE=qwen3_vl_caminject \
+  TRAIN_OUTPUT_DIR=output/camera_sft_qwen3vl_8b_caminject/v0-xxxxxx \
   bash camera_movement_sft/eval/run_batch_checkpoints.sh
 
-  如果你评的是 qwen3.5 系列，把 VGGT_MODEL_TYPE 改成：
+  如果你评的是 qwen3.5 系列，把 CAMINJECT_MODEL_TYPE 改成：
 
-  VGGT_MODEL_TYPE=qwen3_5_vggt_direct
+  CAMINJECT_MODEL_TYPE=qwen3_5_caminject
 
   ———
 
-  如果你愿意，我下一步可以再给你补一个 camera_movement_sft/eval/run_batch_checkpoints_vggt_direct.sh 专用薄封装脚本，这样你就不用每次记这么多环
+  如果你愿意，我下一步可以再给你补一个 camera_movement_sft/eval/run_batch_checkpoints_caminject.sh 专用薄封装脚本，这样你就不用每次记这么多环
   境变量。
 
 ### 4. 监控与管理
@@ -261,7 +261,7 @@ bash camera_movement_sft/train.sh qwen3vl-8b
 |---------|-------------------|
 | `train.sh qwen3vl-8b` | `output/camera_sft_qwen3vl_8b/v0-20260525-143000` |
 | `train_camdistill.sh qwen3vl-8b` | `output/camera_sft_qwen3vl_8b_camdistill/v0-20260525-...` |
-| `train_vggt_direct.sh qwen3vl-8b` | `output/camera_sft_qwen3vl_8b_vggt_direct/v0-20260525-...` |
+| `train_caminject.sh qwen3vl-8b` | `output/camera_sft_qwen3vl_8b_caminject/v0-20260525-...` |
 | `train.sh qwen35-9b` | `output/camera_sft_qwen35_9b/v0-20260525-...` |
 
 > 多次训练同一方案会自动递增版本号: `v0`, `v1`, `v2`...
@@ -280,7 +280,7 @@ bash camera_movement_sft/train.sh qwen3vl-8b
 eval/eval_results/
 ├── qwen3vl_8b_v0_testset_300_refined_v1/          ← baseline SFT
 ├── qwen3vl_8b_camdistill_v0_testset_300_.../      ← CamDistill
-├── qwen3vl_8b_vggt_direct_v0_testset_300_.../     ← VGGT-Direct
+├── qwen3vl_8b_caminject_v0_testset_300_.../     ← CamInject
 └── qwen35_9b_v0_testset_300_.../                  ← 其他模型
 ```
 
@@ -399,7 +399,7 @@ camera_movement_sft/
 ├── train_qwen35_4b.sh         # 快捷启动: Qwen3.5-4B
 ├── train_qwen35_9b.sh         # 快捷启动: Qwen3.5-9B
 ├── train_camdistill.sh        # CamDistill 蒸馏训练
-├── train_vggt_direct.sh       # VGGT-Direct baseline 训练
+├── train_caminject.sh       # CamInject baseline 训练
 ├── start_train.sh             # 后台启动训练
 ├── stop_train.sh              # 停止训练
 ├── monitor_train.sh           # 监控训练状态
@@ -409,10 +409,9 @@ camera_movement_sft/
 │   ├── camdistill_plugin.py          # 插件入口: 注册 model types + Template encode/collator/forward_context patch
 │   ├── camdistill_model.py           # CameraTokenModule (交替注意力, ~200M) + align_proj
 │   ├── camdistill_loss.py            # SFT + 余弦蒸馏 Loss (从 _last_video_ids 加载 teacher target)
-│   ├── vggt_direct_model.py          # VGGTDirectCameraAdapter + VGGTProjector (~12.6M, fail-fast)
+│   ├── caminject_model.py          # CamInjectAdapter + VGGTProjector (~12.6M, fail-fast)  [已重命名为 caminject_model.py]
 │   ├── modeling_qwen3_vl_camdistill.py   # Qwen3-VL 修改版 (preexpanded 一致性检查 + camera position)
 │   ├── modeling_qwen3_5_camdistill.py    # Qwen3.5 修改版 (同上)
-│   ├── pose_prompt_baseline.py       # Pose-Prompt baseline 工具
 │   └── vggt_feature_extractor.py     # VGGT 离线预提取 (多 GPU 并行)
 ├── eval/                      # 评测
 │   ├── run_batch_checkpoints.sh          # 自有测试集评测（一键推理+评测）
@@ -432,21 +431,21 @@ camera_movement_sft/
 
 ---
 
-## Camera Token 增强训练（CamDistill / VGGT-Direct）
+## Camera Token 增强训练（CamDistill / CamInject）
 
 除普通 SFT 外，本项目还支持两种 Camera Token 增强方案，为 LLM 注入 3D 空间感知能力：
 
 ### 三种方案对比
 
-| | 普通 SFT | CamDistill (蒸馏) | VGGT-Direct (直接注入) | Pose-Prompt (文本注入) |
-|---|---|---|---|---|
-| **启动脚本** | `train.sh` | `train_camdistill.sh` | `train_vggt_direct.sh` | 无需训练，推理时加 |
-| **Camera Token** | 无 | 自学习模块（交替注意力） | VGGT 冻结输出 | 无（pose 数字转文本） |
-| **推理需 VGGT** | 否 | **否** | 是 | 是（提取 pose） |
-| **需要训练** | 是 | 是 | 是 | **否**（纯推理） |
-| **额外可训练参数** | 0 | ~200M | ~12.6M | 0 |
-| **Loss** | SFT | SFT + 余弦蒸馏 | 仅 SFT | — |
-| **原理** | 纯视觉理解 | 学习空间特征 | 注入空间特征 | 文本提示空间信息 |
+| | 普通 SFT | CamDistill (蒸馏) | CamInject (直接注入) |
+|---|---|---|---|
+| **启动脚本** | `train.sh` | `train_camdistill.sh` | `train_caminject.sh` |
+| **Camera Token** | 无 | 自学习模块（交替注意力） | VGGT 冻结输出 |
+| **推理需 VGGT** | 否 | **否** | 是 |
+| **需要训练** | 是 | 是 | 是 |
+| **额外可训练参数** | 0 | ~200M | ~12.6M |
+| **Loss** | SFT | SFT + 余弦蒸馏 | 仅 SFT |
+| **原理** | 纯视觉理解 | 学习空间特征 | 注入空间特征 |
 
 ---
 
@@ -501,7 +500,7 @@ bash camera_movement_sft/train_camdistill.sh qwen3vl-8b
 
 ---
 
-### 方案二：VGGT-Direct (直接注入)
+### 方案二：CamInject (直接注入)
 
 **核心思想**: 直接使用 VGGT 预提取的 camera token (2048D)，通过可训练的 Projector 投影到 LLM 维度后，作为独立 token 插入 LLM 序列。训练时只训练 Projector + LLM，**推理时需要 VGGT**。
 
@@ -536,22 +535,22 @@ ViT (冻结) → Merger → video_embeds ─────────────
 **关键文件**:
 | 文件 | 作用 |
 |------|------|
-| `plugins/vggt_direct_model.py` | VGGTDirectCameraAdapter + VGGTProjector |
-| `plugins/camdistill_plugin.py` | 插件入口, 注册 VGGTDirect Loader |
+| `plugins/caminject_model.py` | CamInjectAdapter + VGGTProjector |
+| `plugins/camdistill_plugin.py` | 插件入口, 注册 CamInject Loader |
 | `plugins/modeling_qwen3_vl_camdistill.py` | 共用注入逻辑 (`_camdistill_mode='direct'`) |
 
 **使用方式**:
 ```bash
 # 前提: 已预提取 VGGT features (见下方)
 VGGT_CACHE_DIR=/path/to/vggt_cache \
-bash camera_movement_sft/train_vggt_direct.sh qwen3vl-8b
+bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 ```
 
 ---
 
 ### 两种方案共同的注入机制
 
-CamDistill 和 VGGT-Direct 使用 **完全相同的 camera token 注入逻辑**，区别仅在于 camera_embeds 的来源：
+CamDistill 和 CamInject 使用 **完全相同的 camera token 注入逻辑**，区别仅在于 camera_embeds 的来源：
 
 **注入方式**: 每帧 visual tokens 前面独立插入 1 个 camera token
 
@@ -576,13 +575,13 @@ CamDistill 和 VGGT-Direct 使用 **完全相同的 camera token 注入逻辑**�
 
 **Position IDs (3D M-RoPE)**:
 - Camera token 位置: `(temporal=帧时间, height=H_grid//2, width=W_grid//2)` — 帧中心
-- direct 模式（VGGT-Direct）：collator 阶段就启用 camera position（因为序列已扩展）
+- direct 模式（CamInject）：collator 阶段就启用 camera position（因为序列已扩展）
 - learn 模式（CamDistill）：保留旧逻辑兼容
 
 **Fail-fast 校验** (训练时立即报错而不是默默 silently 跑):
 - collator: 有视频输入但 `video_ids` 缺失/数量不匹配 → raise
 - inner forward: `(input_ids == video_token_id).sum() != video_embeds.shape[0]` → raise
-- VGGT-Direct adapter: cache miss / shape 错 / NaN/Inf / projector 输出 NaN → raise
+- CamInject adapter: cache miss / shape 错 / NaN/Inf / projector 输出 NaN → raise
 - CamDistill loss: teacher target 缺失 / 形状错 / NaN → raise
 
 **首次训练前清掉 dataset map cache**: 因为 encode 阶段改了 input_ids 内容，但 ms-swift 的 cache key 不区分 model_type，可能命中旧 cache 导致序列没扩展。
@@ -597,7 +596,7 @@ rm -rf ~/.cache/modelscope/datasets/map_cache/*
 
 ### 使用前提：VGGT / VGGT-Omega 预提取
 
-CamDistill 和 VGGT-Direct 都需要先对训练视频预提取 camera token features。支持两种 Teacher 模型：
+CamDistill 和 CamInject 都需要先对训练视频预提取 camera token features。支持两种 Teacher 模型：
 
 | Teacher | 参数量 | Backbone | 图像尺寸 | Camera Token 维度 |
 |---------|--------|----------|----------|-----------------|
@@ -721,7 +720,7 @@ if "pose_enc" in data:
 - 来自 Aggregator 最后一层 (layer 23) 的 camera token
 - 2048 = frame_attention_output(1024) + global_attention_output(1024) 拼接
 - 包含模型对多帧几何关系的全部理解（丰富的空间特征）
-- 用于 CamDistill 蒸馏 和 VGGT-Direct 注入
+- 用于 CamDistill 蒸馏 和 CamInject 注入
 
 **`pose_enc` (S, 9) 说明**:
 
@@ -732,7 +731,7 @@ if "pose_enc" in data:
 | `[7:9]` | Field of View | 内参 | 水平/垂直视场角, 单位 radian, 经 ReLU+0.01 保正 |
 
 - 是 Camera Head 对 `camera_features` 的 9D 解码结果
-- 用于 Pose-Prompt baseline（转成欧拉角文本注入 prompt）
+- 用于任意需要相机位姿数字的下游任务（比如转成欧拉角文本注入 prompt）
 - 蒸馏时不需要（蒸馏直接用 2048D features 更信息丰富）
 
 #### 训练时的读取方式
@@ -773,9 +772,9 @@ VGGT_CACHE_DIR=/group/40009/dazhaodu/vggt_cache \
 CAMDISTILL_DEPTH=6 \
 bash camera_movement_sft/train_camdistill.sh qwen3vl-8b
 
-# 方案 2: VGGT-Direct（实现简单, 推理时需要 VGGT）
+# 方案 2: CamInject（实现简单, 推理时需要 VGGT）
 VGGT_CACHE_DIR=/group/40009/dazhaodu/vggt_cache \
-bash camera_movement_sft/train_vggt_direct.sh qwen3vl-8b
+bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 
 # 使用 VGGT-Omega cache（只需换目录，代码不变）
 VGGT_CACHE_DIR=/group/40009/dazhaodu/vggt_omega_cache \
@@ -783,7 +782,7 @@ bash camera_movement_sft/train_camdistill.sh qwen3vl-8b
 
 # 其他模型
 VGGT_CACHE_DIR=/path/to/cache bash camera_movement_sft/train_camdistill.sh qwen35-9b
-VGGT_CACHE_DIR=/path/to/cache bash camera_movement_sft/train_vggt_direct.sh qwen35-4b
+VGGT_CACHE_DIR=/path/to/cache bash camera_movement_sft/train_caminject.sh qwen35-4b
 ```
 
 **CamDistill 额外环境变量**:
@@ -794,47 +793,17 @@ VGGT_CACHE_DIR=/path/to/cache bash camera_movement_sft/train_vggt_direct.sh qwen
 | `CAMDISTILL_STRICT_CACHE` | 1 | 1=teacher cache 缺失/损坏直接 raise; 0=warn 后跳过蒸馏 |
 | `VGGT_CACHE_DIR` | (必填) | 预提取 cache 目录 |
 
-**VGGT-Direct 额外环境变量** (fail-fast 配置, 防止 silent fallback 到零特征):
+**CamInject 额外环境变量** (fail-fast 配置, 防止 silent fallback 到零特征):
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `VGGT_CACHE_DIR` | (必填) | 预提取 cache 目录 |
-| `VGGT_DIRECT_STRICT_IDS` | 1 | 1=video_ids 数量与 video 不匹配直接 raise |
-| `VGGT_DIRECT_STRICT_CACHE` | 1 | 1=cache miss/损坏/NaN 直接 raise |
-| `VGGT_DIRECT_MAX_MISS_RATIO` | 0.0 | cache miss 比例阈值 (>阈值时 raise), 0.0=零容忍 |
-| `VGGT_DIRECT_MIN_RATIO_SAMPLES` | 32 | 至少跑过多少样本才检查 miss ratio |
-| `VGGT_DIRECT_LOG_EVERY` | 50 | 每多少步打印一次 cache 命中率统计 |
-
-### Pose-Prompt Baseline（无需训练）
-
-对已训练好的 SFT 模型，在推理时将 VGGT 预测的相机位姿数字以文本形式注入 prompt：
-
-```bash
-# Step 1: 提取 pose (9维: 平移+四元数+FoV → 转成欧拉角文本)
-python camera_movement_sft/plugins/pose_prompt_baseline.py extract_pose \
-    --input_jsonl /path/to/testset.jsonl \
-    --output_dir /path/to/pose_cache/ \
-    --teacher vggt  # 或 vggt_omega
-
-# Step 2: 生成带 pose 描述的推理数据
-python camera_movement_sft/plugins/pose_prompt_baseline.py generate_infer_data \
-    --input_jsonl /path/to/testset.jsonl \
-    --pose_dir /path/to/pose_cache/ \
-    --output_jsonl test_with_pose.jsonl
-
-# Step 3: 用已训练的 SFT 模型推理
-swift infer --model <sft_checkpoint> --val_dataset test_with_pose.jsonl ...
-```
-
-Prompt 中注入的信息示例：
-```
-以下是由3D视觉模型估计的逐帧相机位姿信息（供参考）：
-  t=0.0s: 位移=(0.00,0.00,0.00), 旋转=(roll=0.0°,pitch=0.0°,yaw=0.0°), FoV=(57.3°,68.8°)
-  t=0.2s: 位移=(0.50,0.00,0.10), 旋转=(roll=1.1°,pitch=-0.1°,yaw=5.7°), FoV=(57.3°,68.8°)
-  ...
-```
+| `CAMINJECT_STRICT_IDS` | 1 | 1=video_ids 数量与 video 不匹配直接 raise |
+| `CAMINJECT_STRICT_CACHE` | 1 | 1=cache miss/损坏/NaN 直接 raise |
+| `CAMINJECT_MAX_MISS_RATIO` | 0.0 | cache miss 比例阈值 (>阈值时 raise), 0.0=零容忍 |
+| `CAMINJECT_MIN_RATIO_SAMPLES` | 32 | 至少跑过多少样本才检查 miss ratio |
+| `CAMINJECT_LOG_EVERY` | 50 | 每多少步打印一次 cache 命中率统计 |
 
 所有方案均支持 4 个模型：`qwen3vl-4b`, `qwen3vl-8b`, `qwen35-4b`, `qwen35-9b`
-
 **详细文档**:
 - `CamDistill_注入实现报告.md` — Camera Token 注入的详细实现报告 (5处修改说明)
 - `VGGT_架构详解.md` — VGGT/VGGT-Omega 模型架构分析
