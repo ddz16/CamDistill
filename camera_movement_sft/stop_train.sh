@@ -1,14 +1,14 @@
 #!/bin/bash
 # ============================================================================
-# 停止训练
+# Stop training.
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="${SCRIPT_DIR}/logs/train.pid"
 
 if [ ! -f "${PID_FILE}" ]; then
-    echo "未找到训练进程ID文件: ${PID_FILE}"
-    echo "尝试手动查找..."
+    echo "Training PID file not found: ${PID_FILE}"
+    echo "Trying to locate the process manually..."
     ps aux | grep "swift sft" | grep -v grep
     exit 1
 fi
@@ -16,20 +16,20 @@ fi
 TRAIN_PID=$(cat "${PID_FILE}")
 
 if kill -0 "${TRAIN_PID}" 2>/dev/null; then
-    echo "正在停止训练进程 (PID: ${TRAIN_PID})..."
-    # 先尝试优雅停止
+    echo "Stopping training process (PID: ${TRAIN_PID})..."
+    # Try a graceful stop first.
     kill "${TRAIN_PID}" 2>/dev/null
     sleep 3
-    # 如果还在运行，强制停止
+    # If still running, force-kill it.
     if kill -0 "${TRAIN_PID}" 2>/dev/null; then
-        echo "优雅停止超时，强制终止..."
+        echo "Graceful stop timed out; force killing..."
         kill -9 "${TRAIN_PID}" 2>/dev/null
     fi
-    # 同时杀掉可能的子进程 (deepspeed workers)
+    # Also kill possible child processes (deepspeed workers).
     pkill -P "${TRAIN_PID}" 2>/dev/null
-    echo "训练已停止。"
+    echo "Training stopped."
 else
-    echo "训练进程 (PID: ${TRAIN_PID}) 已不在运行。"
+    echo "Training process (PID: ${TRAIN_PID}) is no longer running."
 fi
 
 rm -f "${PID_FILE}"

@@ -3,10 +3,10 @@
 Data Download Script for CameraBench Videos
 Downloads videos from HuggingFace repository for camera motion understanding.
 
-Default 下载到: /apdcephfs_gy2/share_303094921/hunyuan/yujiazhang/dazhaodu/CameraBench
-Repo:        syCen/Videos4CameraBench (~3000 个 mp4)
+Default download path: /apdcephfs_gy2/share_303094921/hunyuan/yujiazhang/dazhaodu/CameraBench
+Repo:                 syCen/Videos4CameraBench (~3000 mp4 files)
 
-用法:
+Usage:
     python camera_movement_sft/eval/data_download.py
     python camera_movement_sft/eval/data_download.py --output_dir /custom/path
     python camera_movement_sft/eval/data_download.py --repo_id syCen/CameraBench
@@ -44,7 +44,7 @@ def main():
     repo_id = args.repo_id
     output_dir = args.output_dir
 
-    # 默认走 HF 镜像，若环境已设置则保留用户值
+    # Default to the HF mirror; keep whatever the user set if already configured.
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     os.environ.setdefault("HF_TOKEN", "***REMOVED***")
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")

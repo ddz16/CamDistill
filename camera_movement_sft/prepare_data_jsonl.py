@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-数据格式转换脚本: 通用 JSONL → ms-swift 视频训练格式。
+Data-format conversion: generic JSONL -> ms-swift video training format.
 
-输入:
-    JSONL 文件，每行: {"video_id": "xxx", "cos_url": "...", "segments": [...]}
+Input:
+    JSONL file, one entry per line: {"video_id": "xxx", "cos_url": "...", "segments": [...]}
 
-输出:
-    ms-swift SFT 格式 JSONL:
+Output:
+    ms-swift SFT JSONL:
     {"messages": [...], "videos": ["/path/to/video.mp4"]}
 """
 
@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-# 添加父目录到路径以导入 common
+# Add the parent directory to sys.path so `common` can be imported.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from camera_movement_sft.common import (
     SYSTEM_PROMPT,
@@ -25,24 +25,24 @@ from camera_movement_sft.common import (
 
 
 def convert_one(item: dict, video_root: str) -> dict | None:
-    """将单条原始标注转换为 ms-swift SFT 格式。"""
+    """Convert a single raw annotation into the ms-swift SFT format."""
     video_id = item.get("video_id", "")
     segments = item.get("segments", [])
 
     if not segments:
         return None
 
-    # 查找视频文件
+    # Look up the video file.
     video_path = os.path.join(video_root, f"{video_id}.mp4")
     if not os.path.exists(video_path):
         return None
 
-    # 标准化 segments
+    # Normalize segments.
     normalized = normalize_segments(segments)
     if not normalized.get("segments"):
         return None
 
-    # 构建 swift 格式
+    # Build the swift-format entry.
     assistant_content = json.dumps(normalized, ensure_ascii=False)
 
     return {
@@ -56,10 +56,10 @@ def convert_one(item: dict, video_root: str) -> dict | None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="通用 JSONL 数据转换为 ms-swift 训练格式")
-    parser.add_argument("--input_jsonl", type=str, required=True, help="输入 JSONL 文件路径")
-    parser.add_argument("--video_root", type=str, required=True, help="视频文件根目录")
-    parser.add_argument("--output_jsonl", type=str, required=True, help="输出 JSONL 文件路径")
+    parser = argparse.ArgumentParser(description="Convert generic JSONL data into ms-swift training format")
+    parser.add_argument("--input_jsonl", type=str, required=True, help="input JSONL file path")
+    parser.add_argument("--video_root", type=str, required=True, help="root directory of video files")
+    parser.add_argument("--output_jsonl", type=str, required=True, help="output JSONL file path")
     args = parser.parse_args()
 
     count = 0
@@ -84,8 +84,8 @@ def main():
             else:
                 skipped += 1
 
-    print(f"转换完成: {count} 条成功, {skipped} 条跳过")
-    print(f"输出文件: {args.output_jsonl}")
+    print(f"Conversion done: {count} succeeded, {skipped} skipped")
+    print(f"Output file: {args.output_jsonl}")
 
 
 if __name__ == "__main__":
