@@ -155,3 +155,6 @@ camera_movement_sft/train_data/
 
 # ast template
 ast_index_file.py
+
+# User-specific environment config (contains private tokens/paths)
+camera_movement_sft/env.sh

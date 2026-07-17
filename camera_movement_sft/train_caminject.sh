@@ -121,23 +121,10 @@ TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/camera_movement_train_diver
 OUTPUT_DIR="${OUTPUT_DIR:-output/camera_sft_${MODEL_SHORT}}"
 
 # ================================
-# Network proxy configuration
+# Load user environment (proxy, tokens, paths)
 # ================================
-export http_proxy=http://star-proxy.oa.com:3128
-export https_proxy=http://star-proxy.oa.com:3128
-
-# ================================
-# WandB configuration
-# ================================
-export WANDB_API_KEY="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"
-export WANDB_PROJECT="camera-movement"
-
-# ================================
-# HuggingFace configuration
-# ================================
-export HF_HOME="/apdcephfs_gy2/share_303094921/hunyuan/yujiazhang/dazhaodu/hf"
-export USE_HF="${USE_HF:-1}"  # Default: use HuggingFace hub (hits HF_HOME cache); set USE_HF=0 to fall back to ModelScope
-export HF_TOKEN="${HF_TOKEN:-***REMOVED***}"
+# shellcheck source=env.sh
+source "${SCRIPT_DIR}/env.sh"
 
 # ================================
 # GPU configuration

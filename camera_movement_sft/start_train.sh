@@ -16,9 +16,9 @@ MODEL_NAME="${1:-qwen3vl-8b}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${SCRIPT_DIR}/logs/train_${MODEL_NAME}_${TIMESTAMP}.log"
 
-# Network proxy configuration.
-export http_proxy=http://star-proxy.oa.com:3128
-export https_proxy=http://star-proxy.oa.com:3128
+# Load user environment (proxy, tokens, paths).
+# shellcheck source=env.sh
+source "${SCRIPT_DIR}/env.sh"
 
 # Make sure the log directory exists.
 mkdir -p "${SCRIPT_DIR}/logs"

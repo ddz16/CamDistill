@@ -53,16 +53,16 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 
-# Model paths.
-VGGT_REPO = "/group/40009/dazhaodu/vggt"
-VGGT_OMEGA_REPO = "/group/40009/dazhaodu/vggt-omega"
+# Model paths — read from environment variables set in env.sh.
+# Fall back to empty string; the extractor will raise a clear error if not set.
+VGGT_REPO = os.environ.get("VGGT_REPO", "")
+VGGT_OMEGA_REPO = os.environ.get("VGGT_OMEGA_REPO", "")
 
 
 def load_vggt_model(model_path: str, device: str = "cuda"):
     """Load the VGGT model."""
     import os
-    os.environ.setdefault("HF_HOME", "/apdcephfs_gy2/share_303094921/hunyuan/yujiazhang/dazhaodu/hf")
-    os.environ.setdefault("HF_TOKEN", "***REMOVED***")
+    # HF_HOME / HF_TOKEN are already set by env.sh; setdefault keeps them if already present.
 
     if VGGT_REPO not in sys.path:
         sys.path.insert(0, VGGT_REPO)
@@ -87,8 +87,7 @@ def load_vggt_model(model_path: str, device: str = "cuda"):
 def load_vggt_omega_model(model_path: str, device: str = "cuda"):
     """Load the VGGT-Omega model."""
     import os
-    os.environ.setdefault("HF_HOME", "/apdcephfs_gy2/share_303094921/hunyuan/yujiazhang/dazhaodu/hf")
-    os.environ.setdefault("HF_TOKEN", "***REMOVED***")
+    # HF_HOME / HF_TOKEN are already set by env.sh; setdefault keeps them if already present.
 
     if VGGT_OMEGA_REPO not in sys.path:
         sys.path.insert(0, VGGT_OMEGA_REPO)
