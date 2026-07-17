@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Macro-average 评测脚本：按视频数量等权计算准召率。
+Macro-average evaluation script: compute precision/recall weighted equally per video.
 
-与现有 micro-average（帧级别直接累加 TP/FP/FN）不同，
-本脚本先计算每个视频内部的 P/R/F1，再对所有视频取平均。
+Unlike the existing micro-average (which accumulates TP/FP/FN directly at the frame level),
+this script first computes P/R/F1 for each video individually, then averages across all videos.
 
-这样每个视频无论长短，贡献相同的权重。
+This gives every video the same weight regardless of its length.
 
-用法:
-    # 使用默认 GT（从 debug_full_results.jsonl 读取）
+Usage:
+    # Use the default GT (read from debug_full_results.jsonl)
     python eval_macro_average.py
 
-    # 指定外部 GT 文件
+    # Specify an external GT file
     python eval_macro_average.py --gt /path/to/gt.jsonl
 
-    # 对比两个 GT 文件
+    # Compare two GT files
     python eval_macro_average.py --gt /path/to/gt1.jsonl --gt2 /path/to/gt2.jsonl
 """
 
@@ -27,7 +27,7 @@ from typing import Dict, Set, Optional, List, Tuple, Counter as CounterType
 from collections import Counter
 
 # ==========================================================================
-# 复用 evaluate_camera_movement_fixed.py 中的辅助函数
+# Reuse helper functions from evaluate_camera_movement_fixed.py
 # ==========================================================================
 
 DIRECTIONAL_TYPES = {'Pan', 'Tilt', 'Truck', 'Crane', 'Arc', 'Roll'}
@@ -135,11 +135,11 @@ def load_jsonl(filepath):
 
 
 # ==========================================================================
-# Macro-average: 每个视频独立算 P/R/F1，然后对所有视频取平均
+# Macro-average: compute P/R/F1 per video independently, then average across all videos.
 # ==========================================================================
 
 def evaluate_single_video_frame_level(gt_video, pred_video, sample_step=0.1):
-    """对单个视频做帧级别评测，返回该视频的 TP/FP/FN 统计"""
+    """Run frame-level evaluation on a single video and return its TP/FP/FN statistics."""
     gt_segs = get_segments(gt_video)
     pred_segs = get_segments(pred_video)
 
@@ -155,10 +155,10 @@ def evaluate_single_video_frame_level(gt_video, pred_video, sample_step=0.1):
     if eval_start >= eval_end:
         return None
 
-    # 统计
+    # Statistics.
     bm_label = {'tp': 0, 'fp': 0, 'fn': 0}  # basic_movement with direction
-    bm_type = {'tp': 0, 'fp': 0, 'fn': 0}    # basic_movement type only
-    sm = {'tp': 0, 'fp': 0, 'fn': 0}          # special_movement
+    bm_type  = {'tp': 0, 'fp': 0, 'fn': 0}  # basic_movement type only
+    sm       = {'tp': 0, 'fp': 0, 'fn': 0}  # special_movement
     speed_correct = 0
     speed_total = 0
     per_label = defaultdict(lambda: {'tp': 0, 'fp': 0, 'fn': 0})
@@ -229,7 +229,7 @@ def evaluate_single_video_frame_level(gt_video, pred_video, sample_step=0.1):
 
 
 def calc_prf(tp, fp, fn):
-    """计算 P/R/F1"""
+    """Compute precision, recall, and F1."""
     p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
@@ -238,12 +238,12 @@ def calc_prf(tp, fp, fn):
 
 def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
     """
-    Macro-average 评测：先算每个视频的 P/R/F1，再取平均。
-    同时也返回 micro-average 结果作为对比。
+    Macro-average evaluation: compute P/R/F1 per video, then average.
+    Also returns micro-average results for comparison.
     """
     common_videos = sorted(set(gt_data.keys()) & set(pred_data.keys()))
 
-    # 收集每个视频的 P/R/F1
+    # Collect P/R/F1 per video.
     video_results = []
     all_labels_set = set()
 
@@ -256,7 +256,7 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
 
     n_videos = len(video_results)
 
-    # ---- Macro-average: 每个视频先算 P/R/F1，再取平均 ----
+    # ---- Macro-average: compute P/R/F1 per video, then average ----
     macro = {
         'bm_label': {'precision': [], 'recall': [], 'f1': []},
         'bm_type': {'precision': [], 'recall': [], 'f1': []},
@@ -265,7 +265,7 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
     }
     macro_per_label = defaultdict(lambda: {'precision': [], 'recall': [], 'f1': []})
 
-    # ---- Micro-average: 全局累加 TP/FP/FN ----
+    # ---- Micro-average: accumulate TP/FP/FN globally ----
     micro = {
         'bm_label': {'tp': 0, 'fp': 0, 'fn': 0},
         'bm_type': {'tp': 0, 'fp': 0, 'fn': 0},
@@ -276,7 +276,7 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
     micro_per_label = defaultdict(lambda: {'tp': 0, 'fp': 0, 'fn': 0})
 
     for vid, res in video_results:
-        # Micro 累加
+        # Micro accumulation.
         for key in ['bm_label', 'bm_type', 'sm']:
             micro[key]['tp'] += res[key]['tp']
             micro[key]['fp'] += res[key]['fp']
@@ -289,7 +289,7 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
             micro_per_label[label]['fp'] += counts['fp']
             micro_per_label[label]['fn'] += counts['fn']
 
-        # Macro：每个视频的 P/R/F1
+        # Macro: P/R/F1 per video.
         for key in ['bm_label', 'bm_type', 'sm']:
             p, r, f1 = calc_prf(res[key]['tp'], res[key]['fp'], res[key]['fn'])
             macro[key]['precision'].append(p)
@@ -299,7 +299,7 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
         if res['speed_total'] > 0:
             macro['speed_acc'].append(res['speed_correct'] / res['speed_total'])
 
-        # Macro per label: 只在视频有该 label 的 GT 或 Pred 时才计入
+        # Macro per label: only include a video when it has GT or Pred for that label.
         for label in all_labels_set:
             if label in res['per_label']:
                 c = res['per_label'][label]
@@ -308,7 +308,7 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
                 macro_per_label[label]['recall'].append(r)
                 macro_per_label[label]['f1'].append(f1)
 
-    # 汇总 macro
+    # Aggregate macro.
     def avg(lst):
         return sum(lst) / len(lst) if lst else 0.0
 
@@ -361,16 +361,16 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
 
 
 # ==========================================================================
-# GT 加载函数
+# GT loading functions
 # ==========================================================================
 
-# 默认 GT 文件路径
+# Default GT file paths.
 DEFAULT_GT_V1 = "/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/test/500评测集_人工筛选后_with_split_clips.jsonl"
 DEFAULT_GT_V2 = "/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/test/500评测集_人工筛选后_with_split_clips.jsonl"
 
 
 def load_gt_from_external_file(gt_path: str) -> Dict[str, dict]:
-    """从外部 GT 文件加载（格式：video_id, segments）"""
+    """Load GT from an external file (format: video_id, segments)."""
     gt_data = {}
     with open(gt_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -380,13 +380,13 @@ def load_gt_from_external_file(gt_path: str) -> Dict[str, dict]:
             item = json.loads(line)
             vid = item.get('video_id')
             if vid:
-                # GT 文件直接有 segments 字段
+            # GT file has a segments field directly.
                 gt_data[vid] = {'segments': item.get('segments', [])}
     return gt_data
 
 
 def load_gt_from_debug_file(debug_path: str) -> Dict[str, dict]:
-    """从 debug_full_results.jsonl 加载 GT（旧格式兼容）"""
+    """Load GT from debug_full_results.jsonl (legacy format compatibility)."""
     gt_data = {}
     with open(debug_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -402,14 +402,14 @@ def load_gt_from_debug_file(debug_path: str) -> Dict[str, dict]:
 
 
 # ==========================================================================
-# 主程序
+# Main
 # ==========================================================================
 
 def run_evaluation(gt_data: Dict[str, dict], gt_name: str, checkpoints: List[str], base_dir: str):
-    """运行评测并打印结果"""
+    """Run evaluation and print results."""
     print(f"\n{'='*120}")
     print(f"  GT: {gt_name}")
-    print(f"  视频数: {len(gt_data)}")
+    print(f"  Videos: {len(gt_data)}")
     print(f"{'='*120}\n")
 
     all_results = {}
@@ -419,12 +419,12 @@ def run_evaluation(gt_data: Dict[str, dict], gt_name: str, checkpoints: List[str
         result = macro_average_evaluation(gt_data, pred_data)
         all_results[ckpt] = result
 
-    # 1. 总体对比表（Macro vs Micro）
+    # 1. Overall comparison table (Macro vs Micro).
     print("=" * 120)
-    print("  各 Checkpoint 总体指标对比 (Macro-average vs Micro-average)")
+    print("  Per-checkpoint overall metrics (Macro-average vs Micro-average)")
     print("=" * 120)
 
-    header = f"{'Checkpoint':<20} | {'方式':<6} | {'BM+Dir P':>9} {'BM+Dir R':>9} {'BM+Dir F1':>10} | {'BM Type P':>10} {'BM Type R':>10} {'BM Type F1':>11} | {'SM F1':>7} | {'Speed Acc':>10}"
+    header = f"{'Checkpoint':<20} | {'Mode':<6} | {'BM+Dir P':>9} {'BM+Dir R':>9} {'BM+Dir F1':>10} | {'BM Type P':>10} {'BM Type R':>10} {'BM Type F1':>11} | {'SM F1':>7} | {'Speed Acc':>10}"
     print(header)
     print("-" * 120)
 
@@ -438,10 +438,10 @@ def run_evaluation(gt_data: Dict[str, dict], gt_name: str, checkpoints: List[str
             print(f"{ckpt:<20} | {label:<6} | {bm['precision']:>9.4f} {bm['recall']:>9.4f} {bm['f1']:>10.4f} | {bt['precision']:>10.4f} {bt['recall']:>10.4f} {bt['f1']:>11.4f} | {sm['f1']:>7.4f} | {sp['accuracy']:>10.4f}")
         print("-" * 120)
 
-    # 2. 仅 Macro 的排名表
+    # 2. Macro-only ranking table.
     print("\n")
     print("=" * 100)
-    print("  Macro-average (按视频等权) 排名")
+    print("  Macro-average (equal weight per video) ranking")
     print("=" * 100)
     print(f"{'Checkpoint':<20} | {'BM+Dir P':>9} {'BM+Dir R':>9} {'BM+Dir F1':>10} | {'BM Type F1':>11} | {'SM F1':>7} | {'Speed Acc':>10}")
     print("-" * 100)
@@ -458,37 +458,36 @@ def run_evaluation(gt_data: Dict[str, dict], gt_name: str, checkpoints: List[str
         print(f"{ckpt:<20} | {bm['precision']:>9.4f} {bm['recall']:>9.4f} {bm['f1']:>10.4f} | {bt['f1']:>11.4f} | {sm['f1']:>7.4f} | {sp['accuracy']:>10.4f}")
     
     best_macro = sorted_ckpts[0]
-    print(f"\n  >>> Macro-average 最优: {best_macro} (BM+Dir F1 = {all_results[best_macro]['macro']['basic_movement_with_direction']['f1']:.4f})")
-
+    print(f"\n  >>> Best Macro-average: {best_macro} (BM+Dir F1 = {all_results[best_macro]['macro']['basic_movement_with_direction']['f1']:.4f})")
     return all_results, best_macro
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Macro-average 评测脚本")
+    parser = argparse.ArgumentParser(description="Macro-average evaluation script")
     parser.add_argument("--gt", type=str, default=DEFAULT_GT_V1,
-                        help="GT 文件路径（默认使用 500评测集_人工筛选后_with_split_clips.jsonl）")
+                        help="GT file path (default: 500-sample test set)")
     parser.add_argument("--gt2", type=str, default=None,
-                        help="第二个 GT 文件路径（用于对比）")
+                        help="second GT file path (for comparison)")
     parser.add_argument("--compare-default", action="store_true",
-                        help="对比两个默认 GT 文件（v1 和 v2）")
+                        help="compare the two default GT files (v1 and v2)")
     parser.add_argument("--base-dir", type=str,
                         default="/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/eval/output_testset_300_balanced",
-                        help="Checkpoint 输出目录")
+                        help="checkpoint output directory")
     parser.add_argument("--checkpoints", type=str, nargs="+",
                         default=["checkpoint-2500", "checkpoint-3000", "checkpoint-3500",
                                  "checkpoint-4000", "checkpoint-4500", "checkpoint-4536"],
-                        help="要评测的 checkpoint 列表")
+                        help="list of checkpoints to evaluate")
     args = parser.parse_args()
 
     BASE_DIR = args.base_dir
     CHECKPOINTS = args.checkpoints
 
-    # 确定要评测的 GT 文件
+    # Determine which GT files to evaluate.
     gt_files = []
     if args.compare_default:
         gt_files = [
-            (DEFAULT_GT_V1, "500评测集_人工筛选后_with_split_clips.jsonl (v1)"),
-            (DEFAULT_GT_V2, "500评测集_人工筛选后_with_split_clips.jsonl (v2)"),
+            (DEFAULT_GT_V1, "500-sample test set (v1)"),
+            (DEFAULT_GT_V2, "500-sample test set (v2)"),
         ]
     elif args.gt2:
         gt_files = [
@@ -498,21 +497,20 @@ def main():
     else:
         gt_files = [(args.gt, os.path.basename(args.gt))]
 
-    # 运行评测
+    # Run evaluation.
     all_gt_results = {}
     for gt_path, gt_name in gt_files:
-        print(f"\n加载 GT: {gt_path}")
+        print(f"\nLoading GT: {gt_path}")
         gt_data = load_gt_from_external_file(gt_path)
         results, best = run_evaluation(gt_data, gt_name, CHECKPOINTS, BASE_DIR)
         all_gt_results[gt_name] = {'results': results, 'best': best}
 
-    # 如果有多个 GT，打印对比摘要
+    # If there are multiple GTs, print a comparison summary.
     if len(gt_files) > 1:
         print("\n" + "=" * 120)
-        print("  GT 对比摘要（最优 Checkpoint）")
+        print("  GT comparison summary (best checkpoint per GT)")
         print("=" * 120)
-        print(f"{'GT 文件':<45} | {'Best Ckpt':<18} | {'BM+Dir F1':>10} | {'BM Type F1':>11} | {'SM F1':>7} | {'Speed Acc':>10}")
-        print("-" * 120)
+        print(f"{'GT file':<45} | {'Best Ckpt':<18} | {'BM+Dir F1':>10} | {'BM Type F1':>11} | {'SM F1':>7} | {'Speed Acc':>10}")        print("-" * 120)
         for gt_name, data in all_gt_results.items():
             best_ckpt = data['best']
             res = data['results'][best_ckpt]['macro']

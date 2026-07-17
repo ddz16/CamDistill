@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-运镜训练数据处理公共模块。
+Common module for camera-movement training data processing.
 
-包含:
-    - System Prompt / User Prompt（训练和推理共用）
-    - 标签标准化映射和函数
-    - 闭集定义
+Contains:
+    - System Prompt / User Prompt (shared between training and inference)
+    - Label normalisation maps and functions
+    - Closed-set definitions
 """
 
 from typing import Any, Dict, List, Optional
 
 # ============================================================
-# 闭集定义
+# Closed-set definitions
 # ============================================================
 
-# prompt 闭集 - 基础运镜
+# Prompt closed set - basic movements
 VALID_BASIC_TYPES = {
     "Static", "Unstable", "Dolly In", "Dolly Out", "Truck", "Crane",
     "Follow", "Arc", "Free Fly", "Pan", "Tilt", "Roll",
     "Zoom In", "Zoom Out", "Focus Shift",
 }
 
-# prompt 闭集 - 特殊技法
+# Prompt closed set - special techniques
 VALID_SPECIAL_TYPES = {
     "Handheld", "Steadicam", "Shaky", "360 Orbit", "Dive", "POV",
     "FPV", "Aerial", "Whip Pan", "Dolly Zoom", "Slow Shutter",
@@ -31,19 +31,20 @@ VALID_SPECIAL_TYPES = {
 VALID_DIRECTIONS = {"left", "right", "up", "down", "clockwise", "counterclockwise"}
 VALID_SPEEDS = {"zero", "slow", "medium", "fast"}
 
-# 需要方向的基础运镜
+# Basic movements that require a direction.
 DIRECTION_REQUIRED = {"Truck", "Crane", "Pan", "Tilt", "Arc", "Roll"}
-# 方向必须为 null 的基础运镜
+# Basic movements whose direction must be null.
 DIRECTION_FORBIDDEN = {
     "Static", "Unstable", "Dolly In", "Dolly Out", "Follow",
     "Free Fly", "Zoom In", "Zoom Out", "Focus Shift",
 }
 
+
 # ============================================================
-# 标签标准化映射（将训练数据标签对齐到 prompt 闭集定义）
+# Label normalisation maps (align training-data labels to the prompt closed set)
 # ============================================================
 
-# 原始数据中带方向后缀的标签 → (标准type, direction)
+# Labels with a direction suffix in the raw data -> (canonical type, direction)
 MOVEMENT_NORMALIZE_MAP = {
     "Pedestal Down": ("Crane", "down"),
     "Pedestal Up": ("Crane", "up"),
@@ -51,7 +52,7 @@ MOVEMENT_NORMALIZE_MAP = {
     "Truck Right": ("Truck", "right"),
 }
 
-# 默认方向（当需要方向但缺失时使用）
+# Default directions (used when a direction is required but missing)
 DEFAULT_DIRECTIONS = {
     "Truck": "right",
     "Crane": "down",
@@ -61,18 +62,19 @@ DEFAULT_DIRECTIONS = {
     "Roll": "clockwise",
 }
 
-# 特殊技法名称标准化映射（小写 → 标准名称）
-# 用于修正标注数据中的大小写不一致问题，如 "Top-down shot" → "Top-down Shot"
+# Special-technique name normalisation map (lowercase -> canonical name).
+# Fixes case inconsistencies in annotation data, e.g. "Top-down shot" -> "Top-down Shot".
 _SPECIAL_NORMALIZE_MAP = {s.lower(): s for s in VALID_SPECIAL_TYPES}
 
 
 # ============================================================
-# System Prompt（训练和推理共用，修改后所有脚本自动同步）
+# System Prompt (shared between training and inference; all scripts auto-sync on edit)
 #
-# 语言开关: 环境变量 CAMERA_PROMPT_LANG = en(默认) | zh
-#   - SYSTEM_PROMPT / USER_PROMPT 按该开关自动指向 zh 或 en 版本
-#   - 数据再生脚本可直接 import SYSTEM_PROMPT_EN / USER_PROMPT_EN
-#   注意: 枚举值(Static/Zoom In/...)、方向/速度、JSON 字段名两版完全一致, 只译自然语言说明。
+# Language switch: env var CAMERA_PROMPT_LANG = en (default) | zh
+#   - SYSTEM_PROMPT / USER_PROMPT automatically point to the zh or en version.
+#   - Data-generation scripts can import SYSTEM_PROMPT_EN / USER_PROMPT_EN directly.
+#   Note: enum values (Static/Zoom In/...), directions, speeds, and JSON field names are
+#         identical in both versions; only the natural-language descriptions are translated.
 # ============================================================
 import os
 
@@ -245,7 +247,7 @@ Output only JSON, do not output anything else."""
 USER_PROMPT_EN = "Analyze the camera movement in this video and output JSON following the system prompt rules. Output only JSON."
 
 
-# 按环境变量选择语言 (默认 en)。所有 import SYSTEM_PROMPT/USER_PROMPT 的脚本自动跟随。
+# Select language via env var (default: en). All scripts that import SYSTEM_PROMPT/USER_PROMPT follow automatically.
 _PROMPT_LANG = os.environ.get("CAMERA_PROMPT_LANG", "en").strip().lower()
 if _PROMPT_LANG == "zh":
     SYSTEM_PROMPT = SYSTEM_PROMPT_ZH
@@ -256,46 +258,46 @@ else:
 
 
 # ============================================================
-# 标签标准化函数
+# Label normalisation functions
 # ============================================================
 
 def normalize_basic_movement(bm: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """将原始标签中的运镜标准化为闭集格式。
-    
+    """Normalise a raw movement label into the closed-set format.
+
     Args:
-        bm: 原始 basic_movement 字典，包含 type, direction, speed
-        
+        bm: raw basic_movement dict containing type, direction, speed.
+
     Returns:
-        标准化后的字典，如果类型不在闭集中则返回 None
+        Normalised dict, or None if the type is not in the closed set.
     """
     raw_type = bm.get("type", "")
     direction = bm.get("direction")
     speed = bm.get("speed", "medium")
 
-    # 映射带方向后缀的标签
+    # Map labels that carry a direction suffix.
     if raw_type in MOVEMENT_NORMALIZE_MAP:
         std_type, std_direction = MOVEMENT_NORMALIZE_MAP[raw_type]
-        # 如果原始数据有 direction 且有效，优先使用原始 direction
+        # If the raw data already has a valid direction, keep it.
         if direction and direction in VALID_DIRECTIONS:
             pass
         else:
             direction = std_direction
         raw_type = std_type
 
-    # 跳过不在闭集中的类型
+    # Skip types that are not in the closed set.
     if raw_type not in VALID_BASIC_TYPES:
         return None
 
-    # 修正 direction 规则
+    # Enforce direction rules.
     if raw_type in DIRECTION_REQUIRED:
         if not direction or direction not in VALID_DIRECTIONS:
             direction = DEFAULT_DIRECTIONS.get(raw_type, "right")
     elif raw_type in DIRECTION_FORBIDDEN:
         direction = None
 
-    # 修正 speed 规则
+    # Enforce speed rules.
     if raw_type == "Static":
-        # Static 允许 zero（完全静止）或 slow（极微小晃动）
+        # Static allows zero (completely still) or slow (extremely slight jitter).
         if speed not in {"zero", "slow"}:
             speed = "zero"
     elif speed not in VALID_SPEEDS or speed == "zero":
@@ -305,15 +307,15 @@ def normalize_basic_movement(bm: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def normalize_special_movements(specials: List[str]) -> List[str]:
-    """过滤只保留闭集内的特殊技法，同时修正大小写不一致。
-    
-    例如: "Top-down shot" → "Top-down Shot"
-    
+    """Filter to keep only special techniques in the closed set, and fix case inconsistencies.
+
+    Example: "Top-down shot" -> "Top-down Shot"
+
     Args:
-        specials: 原始特殊技法列表
-        
+        specials: raw list of special techniques.
+
     Returns:
-        过滤并标准化后只包含有效技法的列表
+        Filtered and normalised list containing only valid techniques.
     """
     if not specials:
         return []
@@ -324,7 +326,7 @@ def normalize_special_movements(specials: List[str]) -> List[str]:
         if s in VALID_SPECIAL_TYPES:
             result.append(s)
         else:
-            # 尝试通过小写映射修正大小写不一致
+            # Try to fix case inconsistencies via the lowercase map.
             normalized = _SPECIAL_NORMALIZE_MAP.get(s.lower())
             if normalized:
                 result.append(normalized)
@@ -332,13 +334,13 @@ def normalize_special_movements(specials: List[str]) -> List[str]:
 
 
 def normalize_segments(segments: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """标准化 segments 列表，使其符合 prompt 闭集定义。
-    
+    """Normalise a segments list so it conforms to the prompt closed-set definition.
+
     Args:
-        segments: 原始 segments 列表
-        
+        segments: raw segments list.
+
     Returns:
-        {"segments": [...]} 格式的标准化结果
+        Normalised result in {"segments": [...]} format.
     """
     new_segments = []
     for seg in segments:
@@ -348,10 +350,10 @@ def normalize_segments(segments: List[Dict[str, Any]]) -> Dict[str, Any]:
             if normalized:
                 new_basics.append(normalized)
         if not new_basics:
-            # 如果所有运镜都被过滤掉了，跳过此段
+            # Skip this segment if all movements were filtered out.
             continue
 
-        # 去重（同一 segment 内不应有重复 type）
+        # Deduplicate (a single segment should not contain duplicate types).
         seen_types = set()
         deduped_basics = []
         for bm in new_basics:
@@ -359,7 +361,7 @@ def normalize_segments(segments: List[Dict[str, Any]]) -> Dict[str, Any]:
                 seen_types.add(bm["type"])
                 deduped_basics.append(bm)
 
-        # 限制最多 3 个
+        # Cap at 3 items.
         deduped_basics = deduped_basics[:3]
 
         new_seg = {
@@ -372,7 +374,7 @@ def normalize_segments(segments: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
         new_segments.append(new_seg)
 
-    # 对齐相邻 segments 的时间：前一个 end_time = 后一个 start_time
+    # Align adjacent segment times: previous end_time = next start_time.
     for i in range(len(new_segments) - 1):
         next_start = new_segments[i + 1]["start_time"]
         new_segments[i]["end_time"] = next_start
@@ -381,14 +383,14 @@ def normalize_segments(segments: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def normalize_label_with_nested_segments(label: Dict[str, Any]) -> Dict[str, Any]:
-    """标准化嵌套格式的 label（SpatialVID 数据格式）。
-    
-    输入格式: {"segments": [...]}
-    
+    """Normalise a label in the nested-segments format (SpatialVID data format).
+
+    Input format: {"segments": [...]}
+
     Args:
-        label: 包含 segments 键的字典
-        
+        label: dict containing a "segments" key.
+
     Returns:
-        标准化后的 {"segments": [...]}
+        Normalised {"segments": [...]}.
     """
     return normalize_segments(label.get("segments", []))

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-时序运镜标注评测脚本（修复版 v2）
-==================
-评估预测的运镜标注与 GT 标注之间的准确性。
+Temporal camera-movement annotation evaluation script (fixed v2).
 
-核心设计：
-1. basic_movement 使用复合标签（type+direction 一体化）评测准召：
-   - 有方向的运镜（Pan/Tilt/Truck/Crane/Arc/Roll）→ "Pan_left", "Tilt_up" 等
-   - 无方向的运镜（Static/Dolly In/Zoom In 等）→ 直接用 type
-   - 同时保留仅 type 的准召作为对比参考
-2. 修复帧跳过问题：GT有segment但Pred没有时，GT标签计入FN；反之计入FP
-3. direction 不再单独评测，已融合进 basic_movement 复合标签的准召中
-4. 只在GT和Pred都有segment的时间范围内评估
+Evaluates the accuracy of predicted camera-movement annotations against GT annotations.
 
-用法:
-    python evaluate_camera_movement_fixed.py --gt gt.jsonl --pred pred1.jsonl [pred2.jsonl ...]
+Core design:
+1. basic_movement uses composite labels (type+direction combined) for precision/recall:
+   - Directional movements (Pan/Tilt/Truck/Crane/Arc/Roll) -> "Pan_left", "Tilt_up", etc.
+   - Non-directional movements (Static/Dolly In/Zoom In, etc.) -> type directly
+   - Also keeps type-only precision/recall as a reference comparison
+2. Fixes the frame-skip issue: when GT has a segment but Pred does not, GT labels count as FN;
+   the reverse counts as FP.
+3. direction is no longer evaluated separately; it is folded into the composite-label P/R.
+4. Evaluation is performed only within the time range covered by both GT and Pred.
+
+Usage:    python evaluate_camera_movement_fixed.py --gt gt.jsonl --pred pred1.jsonl [pred2.jsonl ...]
 """
 
 import json
@@ -25,11 +25,11 @@ from typing import List, Dict, Tuple, Optional, Set
 
 
 # ============================================================================
-# 数据加载
+# Data loading
 # ============================================================================
 
 def load_jsonl(filepath: str) -> Dict[str, dict]:
-    """加载 JSONL 文件，返回 {video_id: data} 字典"""
+    """Load a JSONL file and return a {video_id: data} dict."""
     data = {}
     with open(filepath, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f, 1):
@@ -39,7 +39,7 @@ def load_jsonl(filepath: str) -> Dict[str, dict]:
             try:
                 item = json.loads(line)
             except json.JSONDecodeError as e:
-                print(f"[WARN] {filepath} 第 {line_num} 行 JSON 解析失败: {e}", file=sys.stderr)
+                print(f"[WARN] {filepath} line {line_num} JSON parse error: {e}", file=sys.stderr)
                 continue
             vid = item.get('video_id')
             if vid:
@@ -48,28 +48,28 @@ def load_jsonl(filepath: str) -> Dict[str, dict]:
 
 
 # ============================================================================
-# 辅助函数
+# Helper functions
 # ============================================================================
 
 def get_segment_at_time(segments: List[dict], t: float) -> Optional[dict]:
-    """获取时刻 t 所在的 segment"""
+    """Return the segment that covers time t."""
     for seg in segments:
         if seg['start_time'] <= t < seg['end_time']:
             return seg
-    # 处理最后一个 segment 的 end_time 边界
+    # Handle the end_time boundary of the last segment.
     if segments and t == segments[-1]['end_time']:
         return segments[-1]
     return None
 
 
 def get_segments(video_data: dict) -> List[dict]:
-    """从视频数据中提取 segments，兼容 'segments' 和 'segments_anno' 两种字段名"""
+    """Extract segments from video data, supporting both 'segments' and 'segments_anno' field names."""
     segs = video_data.get('segments') or video_data.get('segments_anno') or []
     return segs
 
 
 def normalize_null(val):
-    """将字符串 'null' / 'Null' / 'NULL' / 空字符串 统一为 None"""
+    """Normalise the string 'null' / 'Null' / 'NULL' / empty string to None."""
     if isinstance(val, str):
         stripped = val.strip()
         if stripped == '' or stripped.lower() == 'null':
@@ -77,25 +77,25 @@ def normalize_null(val):
     return val
 
 
-# 根据标注文档，以下运镜类型需要带方向：
+# According to the annotation spec, the following movement types require a direction:
 # Pan(left/right), Tilt(up/down), Truck(left/right), Crane(up/down),
 # Arc(clockwise/counterclockwise), Roll(clockwise/counterclockwise)
-# 其余类型 direction 必须为 null：
+# All other types must have direction=null:
 # Static, Unstable, Dolly In, Dolly Out, Zoom In, Zoom Out, Follow, Focus Shift, Free Fly
 DIRECTIONAL_TYPES = {'Pan', 'Tilt', 'Truck', 'Crane', 'Arc', 'Roll'}
 
-# ---- 标签归一化映射 ----
-# 模型输出可能使用不同于标注规范的 type 名称，需要统一映射到标注规范中的标准命名。
-# 标准命名参考标注文档（GT 的格式）。
+# ---- Label normalisation map ----
+# The model output may use type names that differ from the annotation spec;
+# map them to the canonical names used in the spec (GT format).
 #
-# 已知的不一致：
-# 1. Pred 使用 "Truck Left" / "Truck Right" (type自带方向, direction=None)
-#    GT 使用 "Truck" + direction="left"/"right"
-# 2. Pred 使用 "Pedestal Up" / "Pedestal Down" (type自带方向, direction=None)
-#    GT 使用 "Crane" + direction="up"/"down" (标注规范中垂直升降统一用 Crane)
+# Known inconsistencies:
+# 1. Pred uses "Truck Left" / "Truck Right" (direction embedded in type, direction=None)
+#    GT uses "Truck" + direction="left"/"right"
+# 2. Pred uses "Pedestal Up" / "Pedestal Down" (direction embedded in type, direction=None)
+#    GT uses "Crane" + direction="up"/"down" (vertical movement is always Crane in the spec)
 #
-# 映射格式: { "原始type": ("归一化type", "归一化direction") }
-# 如果某个原始type需要拆分为 type+direction，则映射到元组
+# Map format: { "raw_type": ("normalised_type", "normalised_direction") }
+# If a raw type needs to be split into type+direction, map it to a tuple.
 TYPE_NORMALIZATION = {
     'Truck Left':     ('Truck', 'left'),
     'Truck Right':    ('Truck', 'right'),
@@ -105,11 +105,11 @@ TYPE_NORMALIZATION = {
 
 
 def normalize_movement(raw_type: str, raw_direction) -> Tuple[str, Optional[str]]:
-    """将原始 (type, direction) 归一化为标注规范中的标准命名。
-    
-    处理两种不一致：
-    1. Pred 使用 "Truck Left"/"Truck Right" → 归一化为 ("Truck", "left"/"right")
-    2. Pred 使用 "Pedestal Up"/"Pedestal Down" → 归一化为 ("Crane", "up"/"down")
+    """Normalise a raw (type, direction) pair to the canonical annotation-spec naming.
+
+    Handles two inconsistencies:
+    1. Pred uses "Truck Left"/"Truck Right" -> normalised to ("Truck", "left"/"right")
+    2. Pred uses "Pedestal Up"/"Pedestal Down" -> normalised to ("Crane", "up"/"down")
     """
     raw_direction = normalize_null(raw_direction)
     
@@ -120,8 +120,8 @@ def normalize_movement(raw_type: str, raw_direction) -> Tuple[str, Optional[str]
     return raw_type, raw_direction
 
 
-def get_basic_movement_types(seg: dict) -> Set[str]:
-    """从 segment 提取 basic_movement type 集合（仅 type，不含方向），经过归一化"""
+def get_basic_movement_types(seg: Optional[dict]) -> Set[str]:
+    """Extract the set of basic_movement types from a segment (type only, no direction), normalised."""
     if seg is None:
         return set()
     types = set()
@@ -134,13 +134,15 @@ def get_basic_movement_types(seg: dict) -> Set[str]:
     return types
 
 
-def get_basic_movement_labels(seg: dict) -> Set[str]:
-    """从 segment 提取 basic_movement 的复合标签集合（经过归一化）。
-    对于有方向的运镜类型（Pan/Tilt/Truck/Crane/Arc/Roll），
-    标签为 "type_direction"（如 "Pan_left"）；
-    对于无方向的类型（Static/Dolly In 等），标签就是 type 本身。
-    
-    如果有方向的类型缺少 direction，仍然退化为只用 type（宽容处理）。
+def get_basic_movement_labels(seg: Optional[dict]) -> Set[str]:
+    """Extract the set of composite basic_movement labels from a segment (normalised).
+
+    For directional movement types (Pan/Tilt/Truck/Crane/Arc/Roll), the label is
+    "type_direction" (e.g. "Pan_left"); for non-directional types (Static/Dolly In, etc.)
+    the label is the type itself.
+
+    If a directional type is missing its direction, it degrades gracefully to type-only
+    (lenient handling).
     """
     if seg is None:
         return set()
@@ -158,8 +160,8 @@ def get_basic_movement_labels(seg: dict) -> Set[str]:
     return labels
 
 
-def get_basic_movement_directions(seg: dict) -> List[Tuple[str, Optional[str]]]:
-    """从 segment 提取归一化后的 (type, direction) 列表"""
+def get_basic_movement_with_direction(seg: Optional[dict]) -> List[Tuple[str, Optional[str]]]:
+    """Extract a normalised list of (type, direction) pairs from a segment."""
     if seg is None:
         return []
     result = []
@@ -171,8 +173,8 @@ def get_basic_movement_directions(seg: dict) -> List[Tuple[str, Optional[str]]]:
     return result
 
 
-def get_special_movements(seg: dict) -> Set[str]:
-    """从 segment 提取 special_movement 集合，过滤掉 null / None / 空字符串"""
+def get_special_movements(seg: Optional[dict]) -> Set[str]:
+    """Extract the set of special_movement values from a segment, filtering out null/None/empty strings."""
     if seg is None:
         return set()
     result = set()
@@ -183,34 +185,34 @@ def get_special_movements(seg: dict) -> Set[str]:
     return result
 
 
-def get_speed(seg: dict) -> Optional[str]:
-    """从 segment 提取 speed，兼容两种格式:
-    1. 旧格式: segment 顶层 speed 字段
-    2. 新格式: speed 在 basic_movement 的每个 item 内部
-    如果有多个 basic_movement，取出现次数最多的 speed（排除 None）
+def get_speed(seg: Optional[dict]) -> Optional[str]:
+    """Extract speed from a segment, supporting two formats:
+    1. Legacy format: top-level speed field on the segment.
+    2. New format: speed inside each basic_movement item.
+    When there are multiple basic_movement items, return the most frequent speed (excluding None).
     """
     if seg is None:
         return None
-    # 先尝试顶层
+    # Try the top-level field first.
     top_speed = seg.get('speed')
     if top_speed is not None:
         return normalize_null(top_speed)
-    # 从 basic_movement 中提取 (新格式)
+    # Extract from basic_movement items (new format).
     speeds = [normalize_null(m.get('speed')) for m in seg.get('basic_movement', [])
               if normalize_null(m.get('speed')) is not None]
     if not speeds:
         return None
-    # 取出现最多的 speed
+    # Return the most frequent speed.
     return Counter(speeds).most_common(1)[0][0]
 
 
 def is_slow_segment(seg: dict) -> bool:
-    """判断一个 segment 是否为 'slow' segment。
-    
-    判定标准：该 segment 的所有 basic_movement 的 speed 都是 "slow"。
-    即：segment 中每个运动都是慢速的。
-    注意：zero / medium / fast 等其他速度不会被过滤。
-    如果 segment 没有 basic_movement，不视为 slow（保留）。
+    """Determine whether a segment is a 'slow' segment.
+
+    Criterion: every basic_movement in the segment has speed == "slow".
+    i.e. all movements in the segment are slow.
+    Note: other speeds (zero / medium / fast) are not filtered.
+    A segment with no basic_movement is not considered slow (it is kept).
     """
     movements = seg.get('basic_movement', [])
     if not movements:
@@ -222,11 +224,12 @@ def is_slow_segment(seg: dict) -> bool:
     return True
 
 
-def filter_slow_segments(data: Dict[str, dict]) -> Dict[str, dict]:
-    """过滤 GT 数据：去掉所有 slow segment（speed 全部为 slow 的 segment）。
-    
-    注意：zero / medium / fast 等其他速度的 segment 会保留。
-    返回一份新的 dict，不修改原始数据。对于过滤后没有任何 segment 的视频，仍保留（空 segments）。
+def filter_slow_segments(gt_data: Dict[str, dict]) -> Dict[str, dict]:
+    """Filter GT data: remove all slow segments (segments where every speed is 'slow').
+
+    Note: segments with other speeds (zero / medium / fast) are kept.
+    Returns a new dict; the original data is not modified. Videos that have no segments
+    after filtering are still kept (with empty segments).
     """
     filtered = {}
     total_removed = 0
@@ -237,19 +240,19 @@ def filter_slow_segments(data: Dict[str, dict]) -> Dict[str, dict]:
         total_removed += len(segs) - len(new_segs)
         total_kept += len(new_segs)
         new_item = dict(item)
-        # 兼容 'segments' 和 'segments_anno' 两种字段名
+        # Support both 'segments' and 'segments_anno' field names.
         if 'segments_anno' in item:
             new_item['segments_anno'] = new_segs
         else:
             new_item['segments'] = new_segs
         filtered[vid] = new_item
-    print(f"  [filter_slow_segments] 过滤前 {total_removed + total_kept} 个 GT segments, "
-          f"去掉 {total_removed} 个 slow segments, 保留 {total_kept} 个")
+    print(f"  [filter_slow_segments] Before: {total_removed + total_kept} GT segments, "
+          f"removed {total_removed} slow segments, kept {total_kept}")
     return filtered
 
 
 def get_video_time_range(segments: List[dict]) -> Tuple[float, float]:
-    """获取segments的时间范围"""
+    """Get the time range of a list of segments."""
     if not segments:
         return 0.0, 0.0
     start = min(s['start_time'] for s in segments)
@@ -258,7 +261,7 @@ def get_video_time_range(segments: List[dict]) -> Tuple[float, float]:
 
 
 def compute_iou(seg_a: dict, seg_b: dict) -> float:
-    """计算两个时间段的 IoU"""
+    """Compute the IoU of two time intervals."""
     start = max(seg_a['start_time'], seg_b['start_time'])
     end = min(seg_a['end_time'], seg_b['end_time'])
     intersection = max(0, end - start)
@@ -270,17 +273,16 @@ def compute_iou(seg_a: dict, seg_b: dict) -> float:
 
 
 # ============================================================================
-# 多标签 Precision / Recall / F1 计算器
+# Multi-label Precision / Recall / F1 accumulators
 # ============================================================================
 
 class MultiLabelMetrics:
-    """多标签 (集合级别) 的 Precision / Recall / F1 累加器"""
-
+    """Multi-label (set-level) Precision / Recall / F1 accumulator."""
     def __init__(self, name: str = ""):
         self.name = name
-        self.tp = 0    # 真阳: pred ∩ gt
-        self.fp = 0    # 假阳: pred - gt
-        self.fn = 0    # 漏报: gt - pred
+        self.tp = 0    # true positive:  pred ∩ gt
+        self.fp = 0    # false positive:  pred - gt
+        self.fn = 0    # false negative:  gt - pred
 
     def update(self, gt_set: Set[str], pred_set: Set[str]):
         self.tp += len(gt_set & pred_set)
@@ -309,8 +311,7 @@ class MultiLabelMetrics:
 
 
 class AccuracyMetrics:
-    """单选属性的 Accuracy 累加器"""
-
+    """Single-select attribute accuracy accumulator."""
     def __init__(self, name: str = ""):
         self.name = name
         self.correct = 0
@@ -333,7 +334,7 @@ class AccuracyMetrics:
 
 
 # ============================================================================
-# Frame-level 评测（修复版）
+# Frame-level evaluation (fixed)
 # ============================================================================
 
 def evaluate_frame_level(gt_data: Dict[str, dict],
@@ -341,24 +342,26 @@ def evaluate_frame_level(gt_data: Dict[str, dict],
                          sample_step: float = 0.1,
                          exclude_slow_gt: bool = False) -> dict:
     """
-    逐帧采样评测（修复版 v2）。
-    
-    核心修改：
-    1. basic_movement 使用复合标签（type+direction 一体化）评测准召：
-       - 有方向的运镜（Pan/Tilt/Truck/Crane/Arc/Roll）→ "Pan_left", "Tilt_up" 等
-       - 无方向的运镜（Static/Dolly In/Zoom In 等）→ 直接用 type
-    2. 修复帧跳过问题：GT有segment但Pred没有 → GT标签全部算FN；反之算FP
-    3. direction 不再单独评测（已融合进复合标签的准召中）
-    4. exclude_slow_gt=True 时，跳过 slow GT segment 覆盖的时间帧（segment 级跳过，不跳过视频）
+    Frame-level evaluation by sampling (fixed v2).
+
+    Key changes:
+    1. basic_movement uses composite labels (type+direction combined) for P/R:
+       - Directional movements (Pan/Tilt/Truck/Crane/Arc/Roll) -> "Pan_left", "Tilt_up", etc.
+       - Non-directional movements (Static/Dolly In/Zoom In, etc.) -> type directly
+    2. Fixes the frame-skip issue: GT has segment but Pred does not -> GT labels all count as FN;
+       the reverse counts as FP.
+    3. direction is no longer evaluated separately (folded into composite-label P/R).
+    4. When exclude_slow_gt=True, skip frames covered by slow GT segments (segment-level skip,
+       not video-level skip).
     """
-    # basic_movement 复合标签（type+direction）的准召
+    # basic_movement composite-label (type+direction) P/R
     basic_mv_label = MultiLabelMetrics("basic_movement_label")
-    # 仅 type 的准召（不考虑方向，用于对比参考）
+    # type-only P/R (ignores direction, for reference comparison)
     basic_mv_type = MultiLabelMetrics("basic_movement_type_only")
     special_mv = MultiLabelMetrics("special_movement")
     speed_acc = AccuracyMetrics("speed")
 
-    # 按复合标签统计细分准召
+    # per-composite-label breakdown P/R
     per_label_metrics = defaultdict(lambda: {'tp': 0, 'fp': 0, 'fn': 0})
 
     common_videos = set(gt_data.keys()) & set(pred_data.keys())
@@ -370,7 +373,7 @@ def evaluate_frame_level(gt_data: Dict[str, dict],
         gt_segs = get_segments(gt_data[vid])
         pred_segs = get_segments(pred_data[vid])
 
-        # exclude_slow_gt: 过滤掉 slow 的 GT segment（segment 级跳过，不跳过视频）
+        # exclude_slow_gt: filter out slow GT segments (segment-level skip, not video-level)
         if exclude_slow_gt:
             gt_segs = [s for s in gt_segs if not is_slow_segment(s)]
 
@@ -378,38 +381,38 @@ def evaluate_frame_level(gt_data: Dict[str, dict],
             n_videos_skipped += 1
             continue
 
-        # 只在GT和Pred都有覆盖的时间范围内评估
+        # Evaluate only within the time range covered by both GT and Pred.
         gt_start, gt_end = get_video_time_range(gt_segs) if gt_segs else (0, 0)
         pred_start, pred_end = get_video_time_range(pred_segs) if pred_segs else (0, 0)
         
         if gt_segs and pred_segs:
-            # 取交集范围
+            # Compute the intersection range.
             eval_start = max(gt_start, pred_start)
             eval_end = min(gt_end, pred_end)
         elif pred_segs and not gt_segs:
-            # GT 过滤后为空，但 Pred 有 → 用 Pred 范围评估（Pred 全算 FP）
+            # GT is empty after filtering but Pred has segments -> evaluate over Pred range (all Pred = FP).
             eval_start = pred_start
             eval_end = pred_end
         else:
-            # 都没有，已在上面跳过了
+            # Both empty; already skipped above.
             eval_start = gt_start
             eval_end = gt_end
         
         if eval_start >= eval_end:
-            # 没有重叠区域
+            # No overlapping region.
             n_videos_skipped += 1
             continue
 
-        # 逐帧采样（只在交集范围内）
+        # Frame-by-frame sampling (within the intersection range only).
         t = eval_start
         while t < eval_end:
             gt_seg = get_segment_at_time(gt_segs, t)
             pred_seg = get_segment_at_time(pred_segs, t)
 
-            # 修复：不再跳过，而是正确计算 FN / FP
-            # GT 有但 Pred 没有 → GT 的标签全部为 FN（漏报）
-            # GT 没有但 Pred 有 → Pred 的标签全部为 FP（误报）
-            # 双方都没有 → 跳过（不影响任何指标）
+            # Fixed: no longer skip; correctly compute FN / FP.
+            # GT has segment but Pred does not -> all GT labels are FN (missed).
+            # GT has no segment but Pred does -> all Pred labels are FP (false alarm).
+            # Both have no segment -> skip (does not affect any metric).
             if gt_seg is None and pred_seg is None:
                 t = round(t + sample_step, 4)
                 continue
@@ -421,13 +424,13 @@ def evaluate_frame_level(gt_data: Dict[str, dict],
             gt_sm = get_special_movements(gt_seg)
             pred_sm = get_special_movements(pred_seg)
 
-            # 多标签：basic_movement 复合标签（type+direction）
+            # Multi-label: basic_movement composite label (type+direction).
             basic_mv_label.update(gt_labels, pred_labels)
 
-            # 多标签：basic_movement 仅 type（不考虑方向，用于对比）
+            # Multi-label: basic_movement type only (ignores direction, for comparison).
             basic_mv_type.update(gt_types, pred_types)
 
-            # 按复合标签细分
+            # Per-composite-label breakdown.
             all_labels = gt_labels | pred_labels
             for label in all_labels:
                 if label in gt_labels and label in pred_labels:
@@ -437,10 +440,10 @@ def evaluate_frame_level(gt_data: Dict[str, dict],
                 else:
                     per_label_metrics[label]['fn'] += 1
 
-            # 多标签：special_movement
+            # Multi-label: special_movement.
             special_mv.update(gt_sm, pred_sm)
 
-            # 单选：speed（只在双方都有有效 segment 且都有 speed 时评估）
+            # Single-select: speed (evaluated only when both sides have a valid segment and speed).
             if gt_seg is not None and pred_seg is not None:
                 gt_sp = get_speed(gt_seg)
                 pred_sp = get_speed(pred_seg)
@@ -450,9 +453,10 @@ def evaluate_frame_level(gt_data: Dict[str, dict],
             n_frames += 1
             t = round(t + sample_step, 4)
 
-    # ---- 按类别 macro: 每个复合标签单独算 P/R/F1, 再对所有类别等权平均 ----
-    # (与 basic_mv_label.to_dict() 的 micro 版本对比: micro 按标签实例累加, 被高频类主导;
-    #  macro 每个运镜类别等权, 反映稀有类表现)
+    # ---- Per-class macro: compute P/R/F1 per composite label, then average equally across classes ----
+    # (Contrast with the micro version in basic_mv_label.to_dict(): micro accumulates by label instance
+    #  and is dominated by high-frequency classes; macro weights each movement class equally,
+    #  reflecting performance on rare classes.)
     def _prf(tp, fp, fn):
         p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -475,7 +479,7 @@ def evaluate_frame_level(gt_data: Dict[str, dict],
         'n_videos': n_videos_evaluated,
         'n_videos_skipped': n_videos_skipped,
         'n_frames': n_frames,
-        # basic_movement(type+direction): micro (原键, 按标签实例累加) + macro (按类别等权)
+        # basic_movement(type+direction): micro (original key, accumulated by label instance) + macro (equal weight per class)
         'basic_movement_with_direction': basic_mv_label.to_dict(),
         'basic_movement_with_direction_macro': basic_mv_label_macro,
         'basic_movement_type_only': basic_mv_type.to_dict(),
@@ -496,16 +500,16 @@ def evaluate_frame_level(gt_data: Dict[str, dict],
 
 
 # ============================================================================
-# Segment-level 评测
+# Segment-level evaluation
 # ============================================================================
 
 def match_segments_greedy(gt_segs: List[dict],
                           pred_segs: List[dict],
                           iou_thresh: float) -> List[Tuple[int, int, float]]:
     """
-    贪心匹配: 按 IoU 从高到低配对 GT segment 和 Pred segment。
-    每个 segment 只匹配一次。
-    返回 [(gt_idx, pred_idx, iou), ...]
+    Greedy matching: pair GT segments and Pred segments in descending IoU order.
+    Each segment is matched at most once.
+    Returns [(gt_idx, pred_idx, iou), ...]
     """
     pairs = []
     for i, gs in enumerate(gt_segs):
@@ -514,7 +518,7 @@ def match_segments_greedy(gt_segs: List[dict],
             if iou >= iou_thresh:
                 pairs.append((i, j, iou))
 
-    # 按 IoU 降序排列，贪心匹配
+    # Sort by IoU descending; greedy matching.
     pairs.sort(key=lambda x: -x[2])
     matched = []
     used_gt, used_pred = set(), set()
@@ -532,19 +536,19 @@ def evaluate_segment_level(gt_data: Dict[str, dict],
                            iou_thresh: float = 0.5,
                            exclude_slow_gt: bool = False) -> dict:
     """
-    Segment-level 评测:
-    1. 用 IoU >= 阈值 做贪心匹配
-    2. 统计 segment 匹配的 P/R/F1
-    3. 在匹配对上评估属性准确性（basic_movement 使用复合标签）
-    4. exclude_slow_gt=True 时，过滤掉 slow GT segment（不参与匹配也不计入 GT 总数）
+    Segment-level evaluation:
+    1. Greedy matching with IoU >= threshold.
+    2. Compute segment-matching P/R/F1.
+    3. Evaluate attribute accuracy on matched pairs (basic_movement uses composite labels).
+    4. When exclude_slow_gt=True, filter out slow GT segments (excluded from matching and GT count).
     """
     total_gt_segs = 0
     total_pred_segs = 0
     total_matched = 0
-    # 耦合检测: 时间匹配(IoU>=阈值) 且 basic_movement(type+direction) 标签集完全一致 才算 TP
+    # Coupled detection: temporal match (IoU>=threshold) AND basic_movement(type+direction) label sets identical -> TP
     total_strict_matched = 0
 
-    # 匹配对上的属性评估
+    # Attribute evaluation on matched pairs.
     matched_basic_mv_label = MultiLabelMetrics("seg_basic_movement_label")
     matched_basic_mv_type = MultiLabelMetrics("seg_basic_movement_type_only")
     matched_special_mv = MultiLabelMetrics("seg_special_movement")
@@ -556,7 +560,7 @@ def evaluate_segment_level(gt_data: Dict[str, dict],
         gt_segs = get_segments(gt_data[vid])
         pred_segs = get_segments(pred_data[vid])
 
-        # exclude_slow_gt: 过滤掉 slow 的 GT segment（segment 级跳过）
+        # exclude_slow_gt: filter out slow GT segments (segment-level skip).
         if exclude_slow_gt:
             gt_segs = [s for s in gt_segs if not is_slow_segment(s)]
 
@@ -570,16 +574,16 @@ def evaluate_segment_level(gt_data: Dict[str, dict],
             gs = gt_segs[gi]
             ps = pred_segs[pi]
 
-            # basic_movement 复合标签（type+direction）
+            # basic_movement composite label (type+direction).
             gt_labels = get_basic_movement_labels(gs)
             pred_labels = get_basic_movement_labels(ps)
             matched_basic_mv_label.update(gt_labels, pred_labels)
 
-            # 耦合检测: 在时间匹配对基础上, 进一步要求 basic_movement 复合标签集完全一致
+            # Coupled detection: on top of temporal match, also require identical basic_movement composite label sets.
             if gt_labels == pred_labels:
                 total_strict_matched += 1
 
-            # basic_movement 仅 type（对比参考）
+            # basic_movement type only (reference comparison).
             gt_types = get_basic_movement_types(gs)
             pred_types = get_basic_movement_types(ps)
             matched_basic_mv_type.update(gt_types, pred_types)
@@ -595,13 +599,13 @@ def evaluate_segment_level(gt_data: Dict[str, dict],
             if gt_sp is not None and pred_sp is not None:
                 matched_speed_acc.update(gt_sp, pred_sp)
 
-    # segment 匹配 P/R/F1
+    # Segment-matching P/R/F1.
     seg_precision = total_matched / total_pred_segs if total_pred_segs > 0 else 0.0
     seg_recall = total_matched / total_gt_segs if total_gt_segs > 0 else 0.0
     seg_f1 = 2 * seg_precision * seg_recall / (seg_precision + seg_recall) \
         if (seg_precision + seg_recall) > 0 else 0.0
 
-    # 耦合检测 (strict detection): IoU>=阈值 且 basic_movement(type+direction) 标签集完全一致
+    # Coupled detection (strict): IoU>=threshold AND basic_movement(type+direction) label sets identical.
     strict_precision = total_strict_matched / total_pred_segs if total_pred_segs > 0 else 0.0
     strict_recall = total_strict_matched / total_gt_segs if total_gt_segs > 0 else 0.0
     strict_f1 = 2 * strict_precision * strict_recall / (strict_precision + strict_recall) \
@@ -613,13 +617,13 @@ def evaluate_segment_level(gt_data: Dict[str, dict],
         'total_gt_segments': total_gt_segs,
         'total_pred_segments': total_pred_segs,
         'total_matched': total_matched,
-        # Segment Localization (Loc): 仅时间定位, 标签无关 (class-agnostic)
+        # Segment Localization (Loc): temporal localisation only, label-agnostic (class-agnostic).
         'segment_localization': {
             'precision': round(seg_precision, 4),
             'recall': round(seg_recall, 4),
             'f1': round(seg_f1, 4),
         },
-        # Segment Detection (Det): IoU>=阈值 且 basic_movement(type+direction) 标签集完全一致 (mAP 式)
+        # Segment Detection (Det): IoU>=threshold AND basic_movement(type+direction) label sets identical (mAP-style).
         'segment_detection': {
             'precision': round(strict_precision, 4),
             'recall': round(strict_recall, 4),
@@ -635,7 +639,7 @@ def evaluate_segment_level(gt_data: Dict[str, dict],
 
 
 # ============================================================================
-# 汇总 & 打印
+# Aggregation & printing
 # ============================================================================
 
 def print_separator(title: str, width: int = 70):
@@ -645,20 +649,20 @@ def print_separator(title: str, width: int = 70):
 
 
 def print_results(pred_name: str, frame_res: dict, seg_res: dict):
-    """打印单个预测文件的完整评测结果"""
-    print_separator(f"评测结果: {pred_name}")
+    """Print the full evaluation results for a single prediction file."""
+    print_separator(f"Evaluation results: {pred_name}")
 
-    # ---- 数据概览 ----
-    print(f"\n  共评测视频: {frame_res['n_videos']} 个（跳过 {frame_res['n_videos_skipped']} 个）")
-    print(f"  Frame-level 采样帧数: {frame_res['n_frames']}")
+    # ---- Data overview ----
+    print(f"\n  Videos evaluated: {frame_res['n_videos']} (skipped: {frame_res['n_videos_skipped']})")
+    print(f"  Frame-level sampled frames: {frame_res['n_frames']}")
     print(f"  GT segments: {seg_res['total_gt_segments']}, "
           f"Pred segments: {seg_res['total_pred_segments']}, "
-          f"匹配数 (IoU>={seg_res['iou_threshold']}): {seg_res['total_matched']}")
+          f"matched (IoU>={seg_res['iou_threshold']}): {seg_res['total_matched']}")
 
     # ---- Frame-level ----
-    print_separator("Frame-level 评测 (逐 0.1s 采样)")
+    print_separator("Frame-level evaluation (sampled every 0.1s)")
 
-    print(f"\n  {'属性 (micro)':<36} {'Precision':>10} {'Recall':>10} {'F1':>10} {'TP':>8} {'FP':>8} {'FN':>8}")
+    print(f"\n  {'Attribute (micro)':<36} {'Precision':>10} {'Recall':>10} {'F1':>10} {'TP':>8} {'FP':>8} {'FN':>8}")
     print(f"  {'-' * 92}")
     for attr_name, display_name in [
         ('basic_movement_with_direction', 'basic_movement(type+dir)'),
@@ -668,40 +672,40 @@ def print_results(pred_name: str, frame_res: dict, seg_res: dict):
         m = frame_res[attr_name]
         print(f"  {display_name:<36} {m['precision']:>10.4f} {m['recall']:>10.4f} {m['f1']:>10.4f} {m['tp']:>8} {m['fp']:>8} {m['fn']:>8}")
 
-    # 按类别 macro (每个运镜类别等权平均, 反映稀有类)
+    # Per-class macro (equal weight per movement class, reflects rare-class performance).
     bm_macro = frame_res.get('basic_movement_with_direction_macro')
     if bm_macro:
         print(f"  {'basic_movement(type+dir) [MACRO]':<36} {bm_macro['precision']:>10.4f} {bm_macro['recall']:>10.4f} {bm_macro['f1']:>10.4f}  ({bm_macro['n_classes']} classes)")
 
-    print(f"\n  {'属性':<36} {'Accuracy':>10} {'Correct':>10} {'Total':>10}")
+    print(f"\n  {'Attribute':<36} {'Accuracy':>10} {'Correct':>10} {'Total':>10}")
     print(f"  {'-' * 68}")
     m = frame_res['speed']
     print(f"  {'speed':<36} {m['accuracy']:>10.4f} {m['correct']:>10} {m['total']:>10}")
 
-    # 按复合标签细分
+    # Per-composite-label breakdown.
     if frame_res.get('per_label_basic_movement'):
-        print(f"\n  [basic_movement 按复合标签细分 (type+direction)]")
+        print(f"\n  [basic_movement per-composite-label breakdown (type+direction)]")
         print(f"  {'Label':<36} {'Precision':>10} {'Recall':>10} {'F1':>10} {'TP':>8} {'FP':>8} {'FN':>8}")
         print(f"  {'-' * 92}")
         for label, m in frame_res['per_label_basic_movement'].items():
             print(f"  {label:<36} {m['precision']:>10.4f} {m['recall']:>10.4f} {m['f1']:>10.4f} {m['tp']:>8} {m['fp']:>8} {m['fn']:>8}")
 
     # ---- Segment-level ----
-    print_separator(f"Segment-level 评测 (IoU >= {seg_res['iou_threshold']})")
+    print_separator(f"Segment-level evaluation (IoU >= {seg_res['iou_threshold']})")
 
     m = seg_res['segment_localization']
-    print(f"\n  [Segment Localization (Loc-F1)]（仅时间定位, 与标签无关, class-agnostic）")
+    print(f"\n  [Segment Localization (Loc-F1)] (temporal localisation only, label-agnostic, class-agnostic)")
     print(f"  {'Precision':<16} {'Recall':<16} {'F1':<16}")
     print(f"  {m['precision']:<16.4f} {m['recall']:<16.4f} {m['f1']:<16.4f}")
 
     sd = seg_res.get('segment_detection')
     if sd:
-        print(f"\n  [Segment Detection (Det-F1)]（IoU>=阈值 且 basic_movement(type+dir) 标签集完全一致, mAP 式）")
-        print(f"  {'Precision':<16} {'Recall':<16} {'F1':<16} {'匹配数':<10}")
+        print(f"\n  [Segment Detection (Det-F1)] (IoU>=threshold AND basic_movement(type+dir) label sets identical, mAP-style)")
+        print(f"  {'Precision':<16} {'Recall':<16} {'F1':<16} {'Matched':<10}")
         print(f"  {sd['precision']:<16.4f} {sd['recall']:<16.4f} {sd['f1']:<16.4f} {sd['total_matched']:<10}")
 
-    print(f"\n  [匹配后属性评估]")
-    print(f"  {'属性':<36} {'Precision':>10} {'Recall':>10} {'F1':>10} {'TP':>8} {'FP':>8} {'FN':>8}")
+    print(f"\n  [Attribute evaluation on matched pairs]")
+    print(f"  {'Attribute':<36} {'Precision':>10} {'Recall':>10} {'F1':>10} {'TP':>8} {'FP':>8} {'FN':>8}")
     print(f"  {'-' * 92}")
     for attr_name, display_name in [
         ('matched_basic_movement_with_direction', 'basic_movement(type+dir)'),
@@ -711,81 +715,81 @@ def print_results(pred_name: str, frame_res: dict, seg_res: dict):
         m = seg_res[attr_name]
         print(f"  {display_name:<36} {m['precision']:>10.4f} {m['recall']:>10.4f} {m['f1']:>10.4f} {m['tp']:>8} {m['fp']:>8} {m['fn']:>8}")
 
-    print(f"\n  {'属性':<36} {'Accuracy':>10} {'Correct':>10} {'Total':>10}")
+    print(f"\n  {'Attribute':<36} {'Accuracy':>10} {'Correct':>10} {'Total':>10}")
     print(f"  {'-' * 68}")
     m = seg_res['matched_speed']
     print(f"  {'speed':<36} {m['accuracy']:>10.4f} {m['correct']:>10} {m['total']:>10}")
 
 
 # ============================================================================
-# 主程序
+# Main
 # ============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description='时序运镜标注评测（修复版）',
+        description='Temporal camera-movement annotation evaluation (fixed)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例:
-  # GT 可以直接用原始标注 JSONL（包含 video_id + segments 即可）
+Examples:
+  # GT can be the raw annotation JSONL directly (needs video_id + segments)
   python evaluate_camera_movement_fixed.py --gt testset_500.jsonl --pred pred1.jsonl
   python evaluate_camera_movement_fixed.py --gt testset_500.jsonl --pred pred1.jsonl pred2.jsonl
   python evaluate_camera_movement_fixed.py --gt testset_500.jsonl --pred pred1.jsonl --iou_thresh 0.3 0.5 0.7
   python evaluate_camera_movement_fixed.py --gt testset_500.jsonl --pred pred1.jsonl --output results.json
   python evaluate_camera_movement_fixed.py --gt testset_500.jsonl --pred pred1.jsonl --exclude_slow_gt
         """)
-    parser.add_argument('--gt', required=True, help='GT JSONL 文件路径（原始标注文件即可，包含 video_id + segments）')
-    parser.add_argument('--pred', nargs='+', required=True, help='预测 JSONL 文件路径 (支持多个)')
+    parser.add_argument('--gt', required=True, help='GT JSONL file path (raw annotation file is fine; needs video_id + segments)')
+    parser.add_argument('--pred', nargs='+', required=True, help='prediction JSONL file path(s) (multiple supported)')
     parser.add_argument('--iou_thresh', nargs='+', type=float, default=[0.3, 0.5, 0.7],
-                        help='Segment-level IoU 阈值 (默认 0.3 0.5 0.7，支持多个)')
+                        help='Segment-level IoU threshold(s) (default 0.3 0.5 0.7, multiple supported)')
     parser.add_argument('--sample_step', type=float, default=0.1,
-                        help='Frame-level 采样步长/秒 (默认 0.1)')
+                        help='Frame-level sampling step in seconds (default 0.1)')
     parser.add_argument('--output', type=str, default=None,
-                        help='输出 JSON 文件路径 (可选)')
+                        help='output JSON file path (optional)')
     parser.add_argument('--exclude_slow_gt', action='store_true', default=False,
-                        help='过滤掉 GT 中 speed 全部为 slow 的 segments，'
-                             '只评测非 slow 运动的部分（zero/medium/fast 等保留）')
+                        help='filter out GT segments where every speed is slow; '
+                             'evaluate only non-slow movements (zero/medium/fast are kept)')
 
     args = parser.parse_args()
     gt_path = args.gt
 
-    # 加载 GT
-    print(f"加载 GT: {gt_path}")
+    # Load GT.
+    print(f"Loading GT: {gt_path}")
     gt_data = load_jsonl(gt_path)
-    print(f"  GT 视频数: {len(gt_data)}")
+    print(f"  GT videos: {len(gt_data)}")
 
-    # 如果指定了 --exclude_slow_gt，提示用户
+    # Notify the user if --exclude_slow_gt was specified.
     if args.exclude_slow_gt:
-        print(f"\n  [--exclude_slow_gt] 评测时将跳过 GT 中 speed 全部为 slow 的 segments（segment 级跳过，不跳过视频）")
+        print(f"\n  [--exclude_slow_gt] Segments where every speed is slow will be skipped during evaluation (segment-level skip, not video-level).")
 
     all_results = {}
 
     for pred_path in args.pred:
-        print(f"\n加载 Pred: {pred_path}")
+        print(f"\nLoading Pred: {pred_path}")
         pred_data = load_jsonl(pred_path)
-        print(f"  Pred 视频数: {len(pred_data)}")
+        print(f"  Pred videos: {len(pred_data)}")
 
         common = set(gt_data.keys()) & set(pred_data.keys())
         only_gt = set(gt_data.keys()) - set(pred_data.keys())
         only_pred = set(pred_data.keys()) - set(gt_data.keys())
-        print(f"  共同视频: {len(common)}, GT独有: {len(only_gt)}, Pred独有: {len(only_pred)}")
+        print(f"  Common videos: {len(common)}, GT-only: {len(only_gt)}, Pred-only: {len(only_pred)}")
 
         if not common:
-            print(f"  [WARN] 没有共同视频，跳过")
+            print(f"  [WARN] No common videos, skipping")
             continue
 
-        # Frame-level 评测
+        # Frame-level evaluation.
         frame_res = evaluate_frame_level(gt_data, pred_data, sample_step=args.sample_step,
                                          exclude_slow_gt=args.exclude_slow_gt)
 
-        # Segment-level 评测 (可能多个 IoU 阈值)
+        # Segment-level evaluation (possibly multiple IoU thresholds).
         seg_results = {}
         for iou_t in args.iou_thresh:
             seg_res = evaluate_segment_level(gt_data, pred_data, iou_thresh=iou_t,
                                              exclude_slow_gt=args.exclude_slow_gt)
             seg_results[f"iou_{iou_t}"] = seg_res
 
-        # 打印结果 (对每个 IoU 阈值都打印)
+        # Print results (for each IoU threshold).
         for iou_key, seg_res in seg_results.items():
             print_results(pred_path, frame_res, seg_res)
 
@@ -794,16 +798,16 @@ def main():
             'segment_level': seg_results,
         }
 
-    # 多文件对比摘要
+    # Multi-file comparison summary.
     if len(args.pred) > 1 and len(all_results) > 1:
-        print_separator("多文件对比摘要")
-        print(f"\n  {'文件':<40} {'BM+Dir-microF1':>15} {'BM+Dir-macroF1':>15} {'SM-F1':>8} {'Spd-Acc':>8} {'Loc-F1@.5':>10} {'Det-F1@.5':>10}")
+        print_separator("Multi-file comparison summary")
+        print(f"\n  {'File':<40} {'BM+Dir-microF1':>15} {'BM+Dir-macroF1':>15} {'SM-F1':>8} {'Spd-Acc':>8} {'Loc-F1@.5':>10} {'Det-F1@.5':>10}")
         print(f"  {'-' * 108}")
         for pred_path, res in all_results.items():
             parts = pred_path.rstrip('/').split('/')
             fname = '/'.join(parts[-2:]) if len(parts) >= 2 else parts[-1]
             fr = res['frame_level']
-            # 摘要取 IoU=0.5 (若无则取第一个阈值)
+            # Summary uses IoU=0.5 (falls back to the first threshold if 0.5 is not available).
             seg = res['segment_level'].get('iou_0.5') or list(res['segment_level'].values())[0]
             bm_macro = fr.get('basic_movement_with_direction_macro', {}).get('f1', 0.0)
             loc = seg.get('segment_localization', {}).get('f1', 0.0)
@@ -816,13 +820,13 @@ def main():
                   f"{loc:>10.4f} "
                   f"{det:>10.4f}")
 
-    # 保存 JSON
+    # Save JSON.
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(all_results, f, ensure_ascii=False, indent=2)
-        print(f"\n结果已保存到: {args.output}")
+        print(f"\nResults saved to: {args.output}")
 
-    print("\n评测完成!")
+    print("\nEvaluation complete!")
 
 
 if __name__ == '__main__':
