@@ -1,42 +1,42 @@
 #!/bin/bash
-export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # 默认 decord(可被环境变量覆盖), 避开 torchcodec 的 CUDA(libnvrtc.so.13)版本不匹配
+export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # Default to decord (overridable via env), avoids torchcodec's CUDA (libnvrtc.so.13) version mismatch
 export LD_LIBRARY_PATH="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib:${LD_LIBRARY_PATH}"
 export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${LD_PRELOAD:+:$LD_PRELOAD}"
 # ============================================================================
-# CamInject Baseline 训练脚本
+# CamInject Baseline training script.
 # ============================================================================
-# 直接使用 VGGT 冻结输出的 camera token 注入 LLM，不做蒸馏。
-# 支持两种特征来源模式：
-#   1) cache  (默认): 读取预提取 .pt 特征，吞吐高、稳定
-#   2) online: 每个 batch 在线跑 VGGT/VGGT-Omega 提取 camera token（无需预提取）
+# Inject frozen VGGT camera tokens directly into the LLM without distillation.
+# Two feature-source modes are supported:
+#   1) cache  (default): read pre-extracted .pt features; high throughput, stable.
+#   2) online: run VGGT/VGGT-Omega per batch to extract camera tokens (no pre-extraction).
 #
-# 可训练参数: VGGTProjector (~8M) + LLM
-# Loss: 仅标准 SFT Cross-Entropy
+# Trainable params: VGGTProjector (~8M) + LLM
+# Loss: standard SFT cross-entropy only.
 #
-# 用法:
-#   # 离线 cache 模式（默认）
+# Usage:
+#   # Offline cache mode (default).
 #   VGGT_MODE=cache VGGT_CACHE_DIR=/path/to/cache \
 #   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
-#   # 在线提取模式（无需预提取）
+#   # Online extraction mode (no pre-extraction).
 #   VGGT_MODE=online VGGT_TEACHER_TYPE=vggt_omega \
 #   VGGT_MODEL_PATH=/group/40009/dazhaodu/vggt-omega/checkpoints/vggt_omega_1b_512.pt \
 #   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
-#   # 指定 camera token 插入到每帧 visual tokens 末尾
+#   # Insert camera token at the end of each frame's visual tokens.
 #   CAMERA_TOKEN_INSERT_POSITION=back \
 #   VGGT_MODE=cache VGGT_CACHE_DIR=/path/to/cache \
 #   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
-# 支持模型: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b
+# Supported models: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b
 # ============================================================================
 
 set -e
 
-# 注意：请在运行脚本前手动激活 conda 环境（conda activate cm）
+# NOTE: activate the conda environment manually before running (conda activate cm).
 
 # ================================
-# 模型选择
+# Model selection
 # ================================
 MODEL_NAME="${1:-qwen3vl-8b}"
 
@@ -78,17 +78,17 @@ case "${MODEL_NAME}" in
         DEEPSPEED_STAGE=${DEEPSPEED_STAGE:-zero2}
         ;;
     *)
-        echo "错误: 未知模型 '${MODEL_NAME}'"
-        echo "支持的模型: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b"
+        echo "Error: unknown model '${MODEL_NAME}'"
+        echo "Supported: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b"
         exit 1
         ;;
 esac
 
 # ================================
-# VGGT 配置
+# VGGT configuration
 # ================================
 export VGGT_MODE="${VGGT_MODE:-cache}"
-export VGGT_TEACHER_TYPE="${VGGT_TEACHER_TYPE:-vggt}"  # "vggt" 或 "vggt_omega"
+export VGGT_TEACHER_TYPE="${VGGT_TEACHER_TYPE:-vggt}"  # "vggt" or "vggt_omega"
 export VGGT_MODEL_PATH="${VGGT_MODEL_PATH:-}"
 if [ -z "${VGGT_MODEL_PATH}" ]; then
     if [ "${VGGT_TEACHER_TYPE}" = "vggt_omega" ]; then
@@ -101,18 +101,19 @@ export VGGT_CACHE_DIR="${VGGT_CACHE_DIR:-}"
 
 if [ "${VGGT_MODE}" = "cache" ]; then
     if [ -z "${VGGT_CACHE_DIR}" ]; then
-        echo "错误: VGGT_MODE=cache 时必须设置 VGGT_CACHE_DIR"
+        echo "Error: VGGT_CACHE_DIR must be set when VGGT_MODE=cache"
         exit 1
     fi
 elif [ "${VGGT_MODE}" = "online" ]; then
-    # online 模式不依赖 cache；若未显式配置 strict_cache，则默认允许在线提取失败时回退由 strict_cache 控制。
+    # Online mode does not depend on the cache; if strict_cache is not explicitly configured,
+    # the behavior on online extraction failure falls back to strict_cache.
     export VGGT_CACHE_DIR=""
 else
-    echo "错误: 不支持的 VGGT_MODE=${VGGT_MODE}（仅支持 cache 或 online）"
+    echo "Error: unsupported VGGT_MODE=${VGGT_MODE} (only 'cache' or 'online' are supported)"
     exit 1
 fi
 
-# CamInject fail-fast 配置（避免 silent fallback 到零特征）
+# CamInject fail-fast configuration (prevents silent fallback to zero features).
 export CAMINJECT_STRICT_IDS="${CAMINJECT_STRICT_IDS:-1}"
 export CAMINJECT_STRICT_CACHE="${CAMINJECT_STRICT_CACHE:-1}"
 export CAMINJECT_MAX_MISS_RATIO="${CAMINJECT_MAX_MISS_RATIO:-0.0}"
@@ -121,12 +122,12 @@ export CAMINJECT_LOG_EVERY="${CAMINJECT_LOG_EVERY:-50}"
 export CAMERA_TOKEN_INSERT_POSITION="${CAMERA_TOKEN_INSERT_POSITION:-front}"
 
 if [ "${CAMERA_TOKEN_INSERT_POSITION}" != "front" ] && [ "${CAMERA_TOKEN_INSERT_POSITION}" != "back" ]; then
-    echo "错误: CAMERA_TOKEN_INSERT_POSITION 仅支持 front 或 back，当前值: ${CAMERA_TOKEN_INSERT_POSITION}"
+    echo "Error: CAMERA_TOKEN_INSERT_POSITION must be either 'front' or 'back', got: ${CAMERA_TOKEN_INSERT_POSITION}"
     exit 1
 fi
 
 # ================================
-# 路径配置
+# Path configuration
 # ================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
@@ -138,33 +139,33 @@ TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/camera_movement_train_diver
 OUTPUT_DIR="${OUTPUT_DIR:-output/camera_sft_${MODEL_SHORT}}"
 
 # ================================
-# 网络代理配置
+# Network proxy configuration
 # ================================
 export http_proxy=http://star-proxy.oa.com:3128
 export https_proxy=http://star-proxy.oa.com:3128
 
 # ================================
-# WandB 配置
+# WandB configuration
 # ================================
 export WANDB_API_KEY="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"
 export WANDB_PROJECT="camera-movement"
 
 # ================================
-# HuggingFace 配置
+# HuggingFace configuration
 # ================================
 export HF_HOME="/apdcephfs_gy2/share_303094921/hunyuan/yujiazhang/dazhaodu/hf"
-export USE_HF="${USE_HF:-1}"  # 默认用 HuggingFace hub(命中 HF_HOME 缓存); 设 USE_HF=0 切回 ModelScope
+export USE_HF="${USE_HF:-1}"  # Default: use HuggingFace hub (hits HF_HOME cache); set USE_HF=0 to fall back to ModelScope
 export HF_TOKEN="${HF_TOKEN:-***REMOVED***}"
 
 # ================================
-# GPU 配置
+# GPU configuration
 # ================================
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
 
 # ================================
-# 视频处理配置
+# Video processing configuration
 # ================================
 export FPS="${FPS:-5}"
 export FPS_MIN_FRAMES="${FPS_MIN_FRAMES:-4}"
@@ -174,48 +175,48 @@ export VGGT_ONLINE_FPS="${VGGT_ONLINE_FPS:-${FPS}}"
 export VGGT_ONLINE_MAX_FRAMES="${VGGT_ONLINE_MAX_FRAMES:-${FPS_MAX_FRAMES}}"
 
 # ================================
-# 训练超参数
+# Training hyperparameters
 # ================================
 NUM_EPOCHS="${NUM_EPOCHS:-2}"
 MAX_LENGTH="${MAX_LENGTH:-16384}"
 
 # ================================
-# 打印训练信息
+# Print training info
 # ================================
 echo "============================================"
-echo "CamInject Baseline 训练"
+echo "CamInject Baseline training"
 echo "============================================"
-echo "模型:           ${MODEL} (${MODEL_TYPE})"
-echo "VGGT:           ${VGGT_MODEL_PATH} (mode=${VGGT_MODE})"
-echo "VGGT Teacher:   ${VGGT_TEACHER_TYPE}"
-echo "VGGT Cache:     ${VGGT_CACHE_DIR:-<disabled>}"
-echo "Online FPS:     ${VGGT_ONLINE_FPS}"
-echo "Online MaxFrm:  ${VGGT_ONLINE_MAX_FRAMES}"
-echo "Strict IDs:     ${CAMINJECT_STRICT_IDS}"
-echo "Strict Cache:   ${CAMINJECT_STRICT_CACHE}"
-echo "Max Miss Ratio: ${CAMINJECT_MAX_MISS_RATIO}"
-echo "Camera位置:     ${CAMERA_TOKEN_INSERT_POSITION}"
-echo "数据:           ${TRAIN_DATA}"
-echo "输出:           ${OUTPUT_DIR}"
-echo "GPU 数量:       ${NPROC_PER_NODE}"
-echo "有效 Batch:     $((NPROC_PER_NODE * PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION))"
-echo "可训练:         VGGTProjector (~8M) + LLM"
-echo "Loss:           仅 SFT (无蒸馏)"
+echo "Model:            ${MODEL} (${MODEL_TYPE})"
+echo "VGGT:             ${VGGT_MODEL_PATH} (mode=${VGGT_MODE})"
+echo "VGGT teacher:     ${VGGT_TEACHER_TYPE}"
+echo "VGGT cache:       ${VGGT_CACHE_DIR:-<disabled>}"
+echo "Online FPS:       ${VGGT_ONLINE_FPS}"
+echo "Online MaxFrames: ${VGGT_ONLINE_MAX_FRAMES}"
+echo "Strict IDs:       ${CAMINJECT_STRICT_IDS}"
+echo "Strict Cache:     ${CAMINJECT_STRICT_CACHE}"
+echo "Max miss ratio:   ${CAMINJECT_MAX_MISS_RATIO}"
+echo "Camera position:  ${CAMERA_TOKEN_INSERT_POSITION}"
+echo "Data:             ${TRAIN_DATA}"
+echo "Output:           ${OUTPUT_DIR}"
+echo "GPUs:             ${NPROC_PER_NODE}"
+echo "Effective batch:  $((NPROC_PER_NODE * PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION))"
+echo "Trainable:        VGGTProjector (~8M) + LLM"
+echo "Loss:             SFT only (no distillation)"
 echo "============================================"
 
-# 检查
+# Sanity checks.
 if [ ! -f "${PLUGIN_PATH}" ]; then
-    echo "错误: 插件文件不存在: ${PLUGIN_PATH}"; exit 1
+    echo "Error: plugin file not found: ${PLUGIN_PATH}"; exit 1
 fi
 if [ ! -f "${TRAIN_DATA}" ]; then
-    echo "错误: 训练数据不存在: ${TRAIN_DATA}"; exit 1
+    echo "Error: training data not found: ${TRAIN_DATA}"; exit 1
 fi
 if [ "${VGGT_MODE}" = "cache" ] && [ ! -d "${VGGT_CACHE_DIR}" ]; then
-    echo "错误: VGGT_CACHE_DIR 目录不存在: ${VGGT_CACHE_DIR}"; exit 1
+    echo "Error: VGGT_CACHE_DIR directory not found: ${VGGT_CACHE_DIR}"; exit 1
 fi
 
 # ================================
-# 开始训练 (标准 SFT)
+# Start training (standard SFT)
 # ================================
 
 swift sft \
@@ -255,11 +256,11 @@ swift sft \
     --report_to wandb
 
 echo "============================================"
-echo "CamInject 训练完成！"
-echo "输出目录: ${OUTPUT_DIR}"
+echo "CamInject training finished!"
+echo "Output dir: ${OUTPUT_DIR}"
 echo "============================================"
 
-# ===== 训练完成后，所有节点启动占卡程序 =====
-echo "===== 训练完成，启动占卡程序 ====="
+# ===== After training, launch the GPU-occupation program on every node. =====
+echo "===== Training finished, launching GPU-occupation program ====="
 cd /group/40009/dazhaodu
 python run.py --size 25000 --gpus 0,1,2,3,4,5,6,7 --interval 0.002

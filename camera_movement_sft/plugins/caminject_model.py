@@ -1,29 +1,31 @@
 """
-CamInject: 直接使用预提取的 VGGT Camera Token 注入 LLM
+CamInject: inject pre-extracted VGGT camera tokens directly into the LLM.
 
-与 CamDistill 蒸馏方案的对比:
-- CamDistill: 训练一个 CameraTokenModule 从 ViT 中间输出学习 camera token，用 VGGT 做蒸馏 target
-- CamInject: 直接用 VGGT 的 camera token 输出（预提取），只训练投影层
+Comparison with the CamDistill distillation approach:
+- CamDistill: train a CameraTokenModule that learns camera tokens from ViT intermediate
+  outputs, using VGGT features as the distillation target.
+- CamInject: use VGGT's camera token output directly (pre-extracted); only the projection
+  layer is trained.
 
-架构:
-  Video → VGGT (离线预提取) → camera_token (2048)
-                                    ↓
-                              [训练时从 cache 加载]
-                                    ↓
-                              VGGTProjector (可训练, ~8M)
-                                    ↓
+Architecture:
+  Video -> VGGT (offline pre-extraction) -> camera_token (2048)
+                                    v
+                             [loaded from cache at training time]
+                                    v
+                              VGGTProjector (trainable, ~8M)
+                                    v
                               camera_embed (LLM dim)
-                                    ↓
-                        插入 LLM visual tokens 每帧前 (独立 token)
+                                    v
+                        inserted before each frame's visual tokens (independent token)
 
-可训练参数: VGGTProjector (~8M) + LLM (全参或 LoRA)
-Loss: 仅标准 SFT Cross-Entropy (无需蒸馏)
+Trainable parameters: VGGTProjector (~8M) + LLM (full or LoRA).
+Loss: only standard SFT cross-entropy (no distillation needed).
 
-与 CamDistill 共享注入逻辑:
-  - 使用相同的 _inject_camera_into_video_embeds
-  - 使用相同的 _expand_video_placeholders
-  - 使用相同的 position_ids 修改 (camera token 在帧中心)
-  区别仅在于 camera_embeds 的来源不同
+Shares injection logic with CamDistill:
+  - Same _inject_camera_into_video_embeds
+  - Same _expand_video_placeholders
+  - Same position_ids adjustment (camera token sits at the frame center)
+  The only difference is the source of camera_embeds.
 """
 
 import os
@@ -48,8 +50,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 class VGGTProjector(nn.Module):
     """
-    将 VGGT camera token (2048 dim) 投影到 LLM 维度
-    结构: LayerNorm -> Linear -> GELU -> Linear
+    Project a VGGT camera token (2048 dim) to the LLM hidden dimension.
+    Structure: LayerNorm -> Linear -> GELU -> Linear.
     """
 
     def __init__(self, vggt_dim: int = 2048, hidden_dim: int = 2048, llm_dim: int = 4096):
@@ -62,9 +64,9 @@ class VGGTProjector(nn.Module):
     def forward(self, vggt_camera_tokens: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            vggt_camera_tokens: (T_total, 2048) — VGGT 输出的 camera token
+            vggt_camera_tokens: (T_total, 2048) - camera tokens emitted by VGGT.
         Returns:
-            (T_total, llm_dim) — 投影后可直接进 LLM
+            (T_total, llm_dim) - projected tokens ready to be fed to the LLM.
         """
         x = vggt_camera_tokens.to(self.linear_fc1.weight.dtype)
         x = self.norm(x)
@@ -74,17 +76,19 @@ class VGGTProjector(nn.Module):
 
 class CamInjectAdapter(nn.Module):
     """
-    适配器: 对接 CamDistill 的注入管线，但 camera_embeds 来自 VGGT cache 而非 CameraTokenModule。
+    Adapter that plugs into CamDistill's injection pipeline, but sources camera_embeds
+    from the VGGT cache instead of CameraTokenModule.
 
-    与 CameraTokenModule 相同的接口:
+    Same interface as CameraTokenModule:
         forward(vit_intermediates, video_grid_thw) -> (camera_embeds, camera_features)
 
-    但 vit_intermediates 被忽略，camera tokens 从预提取 cache 加载。
+    However, vit_intermediates is ignored; camera tokens are loaded from the pre-extracted cache.
 
-    帧数对齐:
-        VGGT cache 存的是原始帧 (S 帧, fps=5, max=100)
-        模型中 video_grid_thw 的 T = ceil(S / temporal_patch_size)
-        当 temporal_patch_size=2 时, T = S/2, 需要对 VGGT features 做 2帧平均池化
+    Frame-count alignment:
+        The VGGT cache stores the raw frames (S frames, fps=5, max=100).
+        In the model, video_grid_thw's T = ceil(S / temporal_patch_size).
+        When temporal_patch_size=2, T = S/2, so we need to average-pool VGGT features over
+        pairs of consecutive frames.
     """
 
     def __init__(self, llm_dim: int = 4096, vggt_dim: int = 2048, temporal_patch_size: int = 2):
@@ -93,21 +97,21 @@ class CamInjectAdapter(nn.Module):
         self.vggt_dim = vggt_dim
         self.temporal_patch_size = temporal_patch_size
 
-        # 每帧 (即每个 Qwen 时间 patch) 注入 1 个 camera token
-        # VGGT (2T, 2048) → 两帧平均 → (T, 2048)
+        # Inject one camera token per frame (i.e. per Qwen temporal patch).
+        # VGGT (2T, 2048) -> two-frame average -> (T, 2048).
         self.tokens_per_frame = 1
 
-        # 可训练的投影层
+        # Trainable projection layer.
         self.projector = VGGTProjector(
             vggt_dim=vggt_dim,
             hidden_dim=vggt_dim,
             llm_dim=llm_dim,
         )
 
-        # Cache 目录
+        # Cache directory.
         self._cache_dir = ""
 
-        # 数据来源模式: cache 或 online
+        # Data source mode: cache or online.
         self.mode = os.environ.get('VGGT_MODE', 'cache').strip().lower()
         if self.mode not in {'cache', 'online'}:
             raise RuntimeError(f"[CamInject] unsupported VGGT_MODE={self.mode}, expected 'cache' or 'online'")
@@ -129,24 +133,24 @@ class CamInjectAdapter(nn.Module):
 
         self.vggt_model = None
 
-        # 每次 forward 前由外部设置的视频路径 (仅 online 模式需要)
+        # Video paths set by the caller before each forward (only used in online mode).
         self._pending_video_paths: List[str] = []
 
-        # 失败策略/诊断配置
+        # Failure policy / diagnostic configuration.
         self.strict_ids = _env_bool('CAMINJECT_STRICT_IDS', default=False)
         self.strict_cache = _env_bool('CAMINJECT_STRICT_CACHE', default=False)
         self.max_miss_ratio = float(os.environ.get('CAMINJECT_MAX_MISS_RATIO', '1.0'))
         self.min_ratio_samples = int(os.environ.get('CAMINJECT_MIN_RATIO_SAMPLES', '64'))
         self.log_every = int(os.environ.get('CAMINJECT_LOG_EVERY', '50'))
 
-        # 每次 forward 前由外部设置的 video_ids (batch 中的视频 ID 列表)
+        # video_ids set by the caller before each forward (list of video IDs in the batch).
         self._pending_video_ids: List[str] = []
 
-        # 保存最后的输出 (供 loss 或调试使用)
+        # Cached last outputs (available to loss code or debugging).
         self._last_camera_embeds = None
         self._last_camera_features = None
 
-        # 运行统计
+        # Runtime statistics.
         self._forward_step = 0
         self._total_videos = 0
         self._total_cache_hits = 0
@@ -217,7 +221,7 @@ class CamInjectAdapter(nn.Module):
             )
 
     def set_cache_dir(self, cache_dir: str):
-        """设置 cache 目录"""
+        """Set the cache directory."""
         self._cache_dir = cache_dir
         if cache_dir and not os.path.isdir(cache_dir):
             print(f"[CamInject] WARNING: cache dir does not exist: {cache_dir}")
@@ -236,7 +240,7 @@ class CamInjectAdapter(nn.Module):
             self.vggt_model = load_vggt_model(self.vggt_model_path, device=device_str)
 
     def _extract_online_feature(self, video_path: str, device: torch.device, t_model: int) -> torch.Tensor:
-        """在线提取单个视频 VGGT camera feature, 并对齐到 t_model * tokens_per_frame."""
+        """Extract a single video's VGGT camera feature online and align it to t_model * tokens_per_frame."""
         if not isinstance(video_path, str) or not video_path:
             raise RuntimeError('[CamInject] online mode received empty video path')
         if not os.path.exists(video_path):
@@ -293,15 +297,15 @@ class CamInjectAdapter(nn.Module):
         device: torch.device,
     ) -> Tuple[torch.Tensor, int, int, int]:
         """
-        加载 VGGT cache 并对齐帧数到 video_grid_thw 中的 T。
+        Load VGGT cache entries and align their frame counts to T in video_grid_thw.
 
         Args:
-            video_ids: 当前 batch 中的视频 ID 列表
-            video_grid_thw: (num_videos, 3) — 每个视频的 (T, H, W) grid
-            device: 目标设备
+            video_ids: list of video IDs in the current batch.
+            video_grid_thw: (num_videos, 3) - each video's (T, H, W) grid.
+            device: target device.
 
         Returns:
-            aligned_features: (T_total, 2048) — 对齐后的 VGGT features
+            aligned_features: (T_total, 2048) - the aligned VGGT features.
         """
         if video_grid_thw is None or video_grid_thw.numel() == 0:
             empty = torch.zeros(0, self.vggt_dim, device=device, dtype=torch.float32)
@@ -330,7 +334,7 @@ class CamInjectAdapter(nn.Module):
         batch_missing_ids = 0
 
         for i in range(num_videos):
-            t_model = int(video_grid_thw[i, 0].item())  # 模型需要的帧数
+            t_model = int(video_grid_thw[i, 0].item())  # frame count required by the model
             if t_model <= 0:
                 raise RuntimeError(f"[CamInject] invalid t_model={t_model} at index={i}")
 
@@ -347,7 +351,7 @@ class CamInjectAdapter(nn.Module):
                     all_features.append(self._zeros(t_model * self.tokens_per_frame, self.vggt_dim, device))
                 continue
 
-            # cache 模式: 对应 video_id
+            # Cache mode: look up the corresponding video_id.
             if i < len(video_ids):
                 vid = video_ids[i]
             else:
@@ -367,7 +371,7 @@ class CamInjectAdapter(nn.Module):
                 all_features.append(self._zeros(t_model * self.tokens_per_frame, self.vggt_dim, device))
                 continue
 
-            # 从 cache 加载
+            # Load from cache.
             cache_path = os.path.join(self._cache_dir, f"{vid}.pt")
             if not os.path.exists(cache_path):
                 batch_misses += 1
@@ -416,7 +420,7 @@ class CamInjectAdapter(nn.Module):
 
             feats = feats.to(device=device, dtype=torch.float32)
 
-            # 防御性检查: VGGT cache 可能存在 NaN/Inf (来自损坏的视频特征提取)
+            # Defensive check: VGGT cache may contain NaN/Inf (from broken video feature extraction).
             if not torch.isfinite(feats).all():
                 batch_misses += 1
                 msg = f"[CamInject] cache for {vid} contains NaN/Inf"
@@ -424,9 +428,9 @@ class CamInjectAdapter(nn.Module):
                 all_features.append(self._zeros(t_model * self.tokens_per_frame, self.vggt_dim, device))
                 continue
 
-            s_vggt = feats.shape[0]  # VGGT 原始帧数
+            s_vggt = feats.shape[0]  # raw VGGT frame count
 
-            # 边界检查: t_model 必须 > 0
+            # Boundary check: t_model must be > 0.
             if s_vggt <= 0:
                 batch_misses += 1
                 msg = f"[CamInject] invalid cache shape for {vid}: s_vggt={s_vggt}, t_model={t_model}"
@@ -434,13 +438,13 @@ class CamInjectAdapter(nn.Module):
                 all_features.append(self._zeros(t_model * self.tokens_per_frame, self.vggt_dim, device))
                 continue
 
-            # 帧数对齐: VGGT 有 S 帧, 模型需要 t_model * tokens_per_frame 帧
+            # Frame-count alignment: VGGT has S frames, the model needs t_model * tokens_per_frame frames.
             t_out = t_model * self.tokens_per_frame
             if s_vggt == t_out:
-                # 完美对齐 (tokens_per_frame=2 时通常命中)
+                # Perfect alignment (usually hit when tokens_per_frame=2).
                 aligned = feats
             elif s_vggt > t_out:
-                # 下采样: 优先精确平均池化, 否则 adaptive avg
+                # Downsample: prefer exact average pooling, otherwise adaptive avg.
                 ratio = s_vggt // t_out
                 if ratio >= 1 and s_vggt == t_out * ratio:
                     aligned = feats.view(t_out, ratio, -1).mean(dim=1)
@@ -450,7 +454,7 @@ class CamInjectAdapter(nn.Module):
                         feats.T.unsqueeze(0), t_out
                     ).squeeze(0).T
             else:
-                # s_vggt < t_out: 上采样 (少见)
+                # s_vggt < t_out: upsample (rare).
                 aligned = F.interpolate(
                     feats.T.unsqueeze(0), size=t_out, mode='nearest'
                 ).squeeze(0).T
@@ -466,19 +470,20 @@ class CamInjectAdapter(nn.Module):
 
     def forward(
         self,
-        vit_intermediates: list,  # 忽略 (保持与 CameraTokenModule 相同的接口)
+        vit_intermediates: list,  # ignored (kept for interface parity with CameraTokenModule)
         video_grid_thw: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        接口与 CameraTokenModule 完全一致。
+        Same interface as CameraTokenModule.
 
         Args:
-            vit_intermediates: (被忽略) CamDistill 会传 ViT 中间层, CamInject 不需要
-            video_grid_thw: (num_videos, 3) — 每个视频的 (T, H, W) grid
+            vit_intermediates: (ignored) CamDistill passes ViT intermediate layers here;
+                CamInject does not need them.
+            video_grid_thw: (num_videos, 3) - each video's (T, H, W) grid.
 
         Returns:
-            camera_embeds: (T_total, llm_dim) — 投影后的 camera embeddings
-            camera_features: (T_total, 2048) — 原始 VGGT features (用于 loss 或分析)
+            camera_embeds: (T_total, llm_dim) - projected camera embeddings.
+            camera_features: (T_total, 2048) - raw VGGT features (for loss or analysis).
         """
         self._forward_step += 1
         device = video_grid_thw.device
@@ -487,7 +492,8 @@ class CamInjectAdapter(nn.Module):
             if video_grid_thw is not None else 0
         )
 
-        # 防御性对齐: 某些推理路径下，插件新挂接的 adapter 可能未随主模型迁移到目标 GPU。
+        # Defensive alignment: on some inference paths a freshly attached adapter
+        # may not have been moved to the target GPU together with the main model.
         proj_device = self.projector.linear_fc1.weight.device
         if proj_device != device:
             self.projector.to(device=device)
@@ -497,7 +503,7 @@ class CamInjectAdapter(nn.Module):
         pending_video_paths = self._pending_video_paths
         self._pending_video_paths = []
 
-        # 加载 VGGT features 并对齐帧数
+        # Load VGGT features and align frame counts.
         camera_features, batch_hits, batch_misses, batch_missing_ids = self._load_and_align_features(
             pending_video_ids,
             pending_video_paths,
@@ -517,12 +523,12 @@ class CamInjectAdapter(nn.Module):
             batch_missing_ids=batch_missing_ids,
         )
 
-        # 投影到 LLM 维度
+        # Project to the LLM dimension.
         camera_embeds = self.projector(camera_features)
         if not torch.isfinite(camera_embeds).all():
             raise RuntimeError('[CamInject] projector output camera_embeds contains NaN/Inf')
 
-        # 保存输出
+        # Save outputs.
         self._last_camera_embeds = camera_embeds
         self._last_camera_features = camera_features
 

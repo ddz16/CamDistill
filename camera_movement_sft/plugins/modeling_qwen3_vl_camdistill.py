@@ -83,17 +83,17 @@ def _inject_camera_into_video_embeds(
     tokens_per_frame: int = 1,
 ) -> torch.Tensor:
     """
-    将 camera_embeds 插入到 video_embeds 中每帧 visual tokens 的最前面或最后面。
+    Insert camera_embeds in front of / behind each frame's visual tokens inside video_embeds.
 
     Args:
-        video_embeds: (N_total_vis, D) — ViT+Merger 输出的视觉 tokens (所有视频所有帧拼接)
-        camera_embeds: (T_total * tokens_per_frame, D) — 投影后的 camera tokens
-        video_grid_thw: (num_videos, 3) — 每个视频的 (T, H, W)
-        spatial_merge_size: merger 的空间合并尺寸
-        tokens_per_frame: 每个 Qwen 时间 patch 注入多少个 camera token (1 或 2)
+        video_embeds: (N_total_vis, D) -- visual tokens output by ViT+Merger (concat across all videos and all frames)
+        camera_embeds: (T_total * tokens_per_frame, D) -- projected camera tokens
+        video_grid_thw: (num_videos, 3) -- (T, H, W) per video
+        spatial_merge_size: spatial merge size of the merger
+        tokens_per_frame: number of camera tokens injected per Qwen temporal patch (1 or 2)
 
     Returns:
-        new_video_embeds: (N_total_vis + T_total * tokens_per_frame, D) — 插入 camera token 后
+        new_video_embeds: (N_total_vis + T_total * tokens_per_frame, D) -- after inserting camera tokens
     """
     if insert_position not in {'front', 'back'}:
         raise RuntimeError(
@@ -135,10 +135,11 @@ def _build_camera_token_mask(
     insert_position: str,
     tokens_per_frame: int,
 ) -> torch.Tensor:
-    """构造 [B, seq] 布尔 mask, 标记 camera token 在最终序列中的位置 (供 pose 回归 loss 取 LLM 输出)。
+    """Build a [B, seq] boolean mask marking the positions of camera tokens in the final sequence
+    (used to read the LLM output for pose regression loss).
 
-    顺序按 video_grid_thw (视频、帧); 每帧 back=[patches, cam], front=[cam, patches]。
-    数量对不上时返回全 False (上层跳过 pose loss)。
+    Ordered by video_grid_thw (video, frame); for each frame: back=[patches, cam], front=[cam, patches].
+    Returns an all-False mask when counts do not line up (the upper layer skips the pose loss).
     """
     B, seq = input_ids.shape
     K = int(tokens_per_frame)
@@ -174,12 +175,13 @@ def _expand_video_placeholders(
     tokens_per_frame: int = 1,
 ) -> tuple:
     """
-    在 input_ids 中每个连续 video_token 段 (即每帧) 前面或后面插入 K=tokens_per_frame 个额外 placeholder。
-    支持视频帧被 timestamps/vision_start/vision_end 分隔的情况。
-    向量化实现，避免 Python for-loop 逐 token 扫描。
+    Insert K=tokens_per_frame extra placeholders in front of / behind every contiguous
+    video_token segment (i.e. each frame) in input_ids.
+    Handles the case where video frames are separated by timestamps / vision_start / vision_end.
+    Vectorized implementation to avoid a Python for-loop that scans token by token.
 
-    返回: (new_input_ids, new_mm_type, new_attn, dst_positions_list)
-        dst_positions_list: list[Tensor], 每个 sample 中原始 token i 在新序列中的位置
+    Returns: (new_input_ids, new_mm_type, new_attn, dst_positions_list)
+        dst_positions_list: list[Tensor], the new position of every original token i in each sample.
     """
     B, seq_len = input_ids.shape
     device = input_ids.device
@@ -210,14 +212,14 @@ def _expand_video_placeholders(
                 new_mm_type[b, :seq_len] = mm_token_type_ids[b]
             if new_attn is not None:
                 new_attn[b, :seq_len] = attention_mask[b]
-            # 这种情况实际不应发生 (B 中都应该有 video), 但保护性处理
+            # This should not really happen (every sample in B should have a video), but handle it defensively.
             dst_positions_list.append(torch.arange(seq_len, device=device))
             continue
 
-        # 向量化: 找 video segment 起始位置
+        # Vectorized: find video segment start positions.
         shifted = torch.zeros_like(vid_mask)
         shifted[1:] = vid_mask[:-1]
-        segment_starts = vid_mask & ~shifted  # 每个连续 video 段的第一个 token
+        segment_starts = vid_mask & ~shifted  # first token of every contiguous video segment
         segment_ends = vid_mask & ~torch.roll(vid_mask, shifts=-1, dims=0)
         segment_ends[-1] = vid_mask[-1]
 
@@ -229,23 +231,23 @@ def _expand_video_placeholders(
             offsets = torch.zeros_like(segment_ends, dtype=torch.long)
             offsets[1:] = segment_ends[:-1].long().cumsum(0) * K
         src_positions = torch.arange(seq_len, device=device)
-        dst_positions = src_positions + offsets  # 原始 token i 的新位置
+        dst_positions = src_positions + offsets  # new position of the original token i
 
-        # 复制原始 tokens
+        # Copy the original tokens.
         new_input_ids[b, dst_positions] = input_ids[b]
         if new_mm_type is not None:
             new_mm_type[b, dst_positions] = mm_token_type_ids[b]
         if new_attn is not None:
             new_attn[b, dst_positions] = attention_mask[b]
 
-        # 在每个锚点周围写 K 个 placeholder
+        # Write K placeholders around each anchor.
         seg_dst = dst_positions[insert_anchor_mask]  # (num_segments,)
         for k in range(K):
             if insert_position == 'front':
-                # camera 应在原 segment 起点的前 K 格: 起点-K, 起点-K+1, ..., 起点-1
+                # camera should sit K slots before the original segment start: start-K, start-K+1, ..., start-1.
                 cam_pos = seg_dst - K + k
             else:
-                # camera 应在原 segment 终点的后 K 格: 终点+1, +2, ..., +K
+                # camera should sit K slots after the original segment end: end+1, +2, ..., +K.
                 cam_pos = seg_dst + 1 + k
             new_input_ids[b, cam_pos] = video_token_id
             if new_mm_type is not None:
@@ -267,13 +269,13 @@ def _expand_inputs_embeds_for_camera(
     insert_position: str = 'front',
 ) -> torch.Tensor:
     """
-    扩展 inputs_embeds 使其长度与 new_input_ids 一致。
-    在每个新 video segment 的前面或后面插入零占位 (masked_scatter 会覆盖)。
-    向量化实现，避免 Python for-loop 逐 token 扫描。
+    Expand inputs_embeds so its length matches new_input_ids.
+    Insert zero placeholders in front of / behind each new video segment (masked_scatter will overwrite them).
+    Vectorized implementation to avoid a Python for-loop that scans token by token.
 
     orig_dst_positions: list of tensor (B,)
-        每个 batch sample 中, 原始 token i 在新序列中的位置 (= i + 累积偏移)
-        如果传入则使用, 否则按 segment_starts 重新计算
+        The new position of every original token i in each batch sample (= i + cumulative offset).
+        Used if supplied; otherwise recomputed from segment_starts.
     """
     B, old_len, D = inputs_embeds.shape
     new_len = new_input_ids.shape[1]
@@ -292,17 +294,18 @@ def _expand_inputs_embeds_for_camera(
         if orig_dst_positions is not None and b < len(orig_dst_positions):
             dst_pos = orig_dst_positions[b]
         else:
-            # 重新计算: 找 video segment_start, 累积偏移
+            # Recompute: find video segment starts and accumulate offsets.
             vid_mask = (new_input_ids[b] == video_token_id)
             shifted = torch.zeros_like(vid_mask)
             shifted[1:] = vid_mask[:-1]
-            # 注意: 这里要从 new_input_ids 反推, 但新序列里 camera placeholder 也是 video_token_id
-            # 直接用就有问题。所以建议传入 orig_dst_positions
-            # fallback: 假设没有插入, 直接复制前 old_len 个
+            # Note: this would need to back out the info from new_input_ids, but in the new sequence
+            # the camera placeholder shares the video_token_id, so a direct approach is unreliable.
+            # Prefer supplying orig_dst_positions from the caller.
+            # Fallback: assume no insertion happened and copy the first old_len entries directly.
             new_embeds[b, :old_len] = inputs_embeds[b]
             continue
 
-        # 用 dst_pos 直接散列: 原始 token i 放到 dst_pos[i] 位置
+        # Scatter directly using dst_pos: the original token i is placed at position dst_pos[i].
         new_embeds[b, dst_pos] = inputs_embeds[b]
 
     return new_embeds
@@ -1042,7 +1045,7 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         deepstack_feature_lists = []
-        # === CamDistill: 缓存指定 ViT 中间层输出 ===
+        # === CamDistill: cache selected ViT intermediate layer outputs ===
         camdistill_layer_cache = []
         camdistill_extract_layers = getattr(self, '_camdistill_extract_layers', None)
 
@@ -1058,11 +1061,11 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
                     hidden_states
                 )
                 deepstack_feature_lists.append(deepstack_feature)
-            # CamDistill: 缓存中间层 (detach, 不传梯度回 ViT)
+            # CamDistill: cache the intermediate layer (detached; no gradient flows back to ViT).
             if camdistill_extract_layers is not None and layer_num in camdistill_extract_layers:
                 camdistill_layer_cache.append(hidden_states.detach())
 
-        # 保存到 self 上, 供外层 forward 使用
+        # Store on self so the outer forward can consume it.
         if camdistill_extract_layers is not None:
             self._camdistill_layer_cache = camdistill_layer_cache
 
@@ -1266,8 +1269,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         position_temporal = position_temporal.repeat_interleave(llm_grid_h * llm_grid_w) + start_position
         vision_position_ids = torch.stack([position_temporal, position_height, position_width], dim=0)
 
-        # === CamDistill: 每帧插入 K=camera_tokens_per_frame 个 camera token 的 position ===
-        # 顺序必须与 token/embeds 一致: front → camera 在该帧 patch 前; back → 在其后。
+        # === CamDistill: insert K=camera_tokens_per_frame camera-token position(s) per frame ===
+        # Ordering must match tokens/embeds: front -> camera before the frame's patches; back -> after them.
         if include_camera_token:
             K = int(camera_tokens_per_frame)
             cam_center_h = start_position + llm_grid_h // 2
@@ -1277,7 +1280,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             new_pos_list = []
             for t_idx in range(llm_grid_t):
                 cam_temporal = position_temporal[t_idx * patches_per_frame].item()
-                # K 个 camera token 共享同一个 (t, h, w) 中心
+                # The K camera tokens share the same (t, h, w) center.
                 cam_pos = torch.tensor(
                     [[cam_temporal] * K, [cam_center_h] * K, [cam_center_w] * K],
                     device=device, dtype=vision_position_ids.dtype,
@@ -1286,7 +1289,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 if insert_position == 'front':
                     new_pos_list.append(cam_pos)
                     new_pos_list.append(frame_pos)
-                else:  # back: camera 位置排在该帧 patch 之后
+                else:  # back: camera positions follow the frame's patches.
                     new_pos_list.append(frame_pos)
                     new_pos_list.append(cam_pos)
 
@@ -1373,9 +1376,10 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 # image == 1, video == 2
                 else:
                     grid_thw = next(grid_iters[modality_type])
-                    # CamDistill/CamInject: 是否为每帧额外引入 camera token 的 position
-                    # - direct: encode 阶段已扩展 input_ids，需要在 collator/forward 都启用
-                    # - learn: 仅在 forward 阶段启用（保留旧行为）
+                    # CamDistill/CamInject: whether to introduce a per-frame camera-token position.
+                    # - direct: input_ids were already expanded during encode, so enable it in both
+                    #   collator and forward.
+                    # - learn: enable it only inside forward (legacy behavior).
                     cam_mode = getattr(self, '_camdistill_mode', 'learn')
                     preexpanded = bool(getattr(self, '_camdistill_preexpanded_input', False))
                     if cam_mode == 'direct' or preexpanded:
@@ -1388,7 +1392,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                         )
                     cam_module = getattr(self, '_camdistill_module', None)
                     cam_K = int(getattr(cam_module, 'tokens_per_frame', 1)) if cam_module is not None else 1
-                    # 位置编码顺序必须与 token 注入位置一致 (front/back)
+                    # Positional encoding order must match the token injection position (front/back).
                     cam_insert_position = os.environ.get('CAMERA_TOKEN_INSERT_POSITION', 'front').strip().lower()
                     vision_position_ids = self.get_vision_position_ids(
                         current_pos, grid_thw, 1, spatial_merge_size,
@@ -1565,7 +1569,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
-        # 兼容 Template.forward_context 注入的 batch metadata (不会传到 language_model)。
+        # Handle batch metadata forwarded by Template.forward_context (must not reach language_model).
         _batch_video_ids = kwargs.pop('video_ids', None)
 
         def _normalize_video_ids(video_ids):
@@ -1575,7 +1579,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 return [x for x in video_ids if isinstance(x, str) and x]
             return []
 
-        # CamDistill/CamInject: 标记进入 forward (区分 collator 调用 get_rope_index)
+        # CamDistill/CamInject: mark that we are entering forward (distinguishes it from collator calls to get_rope_index).
         self._in_forward = True
 
         if inputs_embeds is None:
@@ -1584,7 +1588,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         image_mask = None
         video_mask = None
 
-        # CamDistill(learn) 的蒸馏元数据按 batch 维护，避免跨 batch 复用旧状态。
+        # CamDistill (learn) distillation metadata is maintained per batch so we do not reuse stale state.
         camdistill_module = getattr(self, '_camdistill_module', None)
         _camdistill_mode = getattr(self, '_camdistill_mode', 'learn')  # 'learn' or 'direct'
         if camdistill_module is not None and _camdistill_mode != 'direct':
@@ -1615,7 +1619,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             deepstack_video_embeds = video_outputs.deepstack_features
             video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
 
-            # === CamDistill / CamInject: 注入 camera tokens ===
+            # === CamDistill / CamInject: inject camera tokens ===
             vit_intermediates = getattr(self.visual, '_camdistill_layer_cache', [])
             _should_inject = (
                 camdistill_module is not None
@@ -1623,8 +1627,9 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 and (_camdistill_mode == 'direct' or vit_intermediates)
             )
             if _should_inject:
-                # 防御性对齐: 插件挂接模块在部分加载路径下可能停留在 CPU。
-                # 在首次注入前把模块迁移到 inputs_embeds 所在设备/精度，避免 layernorm/linear 设备冲突。
+                # Defensive alignment: on some load paths the freshly attached plugin module may stay on CPU.
+                # Move it to the same device/dtype as inputs_embeds before the first injection to avoid
+                # layernorm/linear device conflicts.
                 module_device = None
                 module_dtype = None
                 first_param = next(camdistill_module.parameters(), None)
@@ -1644,13 +1649,13 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                         elif isinstance(_batch_video_ids, (list, tuple)):
                             pending_video_ids = [x for x in _batch_video_ids if isinstance(x, str) and x]
                     camdistill_module._pending_video_ids = pending_video_ids or []
-                    # 供 pose 回归 loss 用: 记录本 batch 的 video_ids / grid_thw
+                    # Used by the pose-regression loss: record video_ids / grid_thw for this batch.
                     camdistill_module._last_video_ids = pending_video_ids or []
                     camdistill_module._last_video_grid_thw = (
                         video_grid_thw.detach().cpu() if video_grid_thw is not None else None)
                 else:
-                    # learn 模式优先使用 kwargs.video_ids；若 forward_context 提前 pop 了
-                    # video_ids，则回退到 _pending_video_ids。
+                    # In learn mode we prefer kwargs.video_ids; if forward_context already popped
+                    # video_ids we fall back to _pending_video_ids.
                     pending_video_ids = _normalize_video_ids(getattr(camdistill_module, '_pending_video_ids', None))
                     if hasattr(camdistill_module, '_pending_video_ids'):
                         camdistill_module._pending_video_ids = []
@@ -1659,7 +1664,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                     if not effective_video_ids:
                         effective_video_ids = pending_video_ids
 
-                    # CamDistill: 保存 teacher 对齐所需 metadata
+                    # CamDistill: store metadata required for teacher alignment.
                     camdistill_module._last_video_ids = effective_video_ids
                     camdistill_module._last_video_grid_thw = video_grid_thw.detach().cpu() if video_grid_thw is not None else None
 
@@ -1668,15 +1673,15 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 camera_insert_position = os.environ.get('CAMERA_TOKEN_INSERT_POSITION', 'front').strip().lower()
                 tokens_per_frame = int(getattr(camdistill_module, 'tokens_per_frame', 1))
                 # camera_embeds: (T_total * tokens_per_frame, llm_dim)
-                # 将 camera embeds 插入到 video_embeds 中每帧的前面或后面
+                # Insert camera embeds in front of / behind each frame in video_embeds.
                 video_embeds = _inject_camera_into_video_embeds(
                     video_embeds, camera_embeds, video_grid_thw,
                     spatial_merge_size=self.config.vision_config.spatial_merge_size,
                     insert_position=camera_insert_position,
                     tokens_per_frame=tokens_per_frame)
-                self.visual._camdistill_layer_cache = []  # 清空缓存
+                self.visual._camdistill_layer_cache = []  # clear cache
 
-                # deepstack_video_embeds 也需要扩展 (camera token 位置填零)
+                # deepstack_video_embeds must also be expanded (zero-fill at camera-token positions).
                 if deepstack_video_embeds:
                     T_total_val = int(video_grid_thw[:, 0].sum().item()) * tokens_per_frame
                     expanded_deepstack = []
@@ -1694,7 +1699,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
 
                 preexpanded = bool(getattr(self, '_camdistill_preexpanded_input', False))
                 if _camdistill_mode == 'direct' or preexpanded:
-                    # direct / preexpanded 模式: encode 阶段已扩展 input_ids/labels/loss_scale，不再在 forward 改序列长度。
+                    # direct / preexpanded mode: input_ids/labels/loss_scale were already expanded during
+                    # encode, so we no longer change the sequence length inside forward.
                     if input_ids is not None:
                         expected_video_tokens = int((input_ids == self.config.video_token_id).sum().item())
                         actual_video_tokens = int(video_embeds.shape[0])
@@ -1705,7 +1711,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                                 f"video_embeds tokens={actual_video_tokens}"
                             )
                 else:
-                    # learn 模式: 兼容旧逻辑，forward 阶段动态扩展。
+                    # learn mode: legacy behavior; expand the sequence dynamically inside forward.
                     T_total = int(video_grid_thw[:, 0].sum().item()) * tokens_per_frame
                     input_ids, mm_token_type_ids, attention_mask, dst_positions_list = _expand_video_placeholders(
                         input_ids, mm_token_type_ids, attention_mask,
@@ -1718,7 +1724,8 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                         orig_dst_positions=dst_positions_list,
                         insert_position=camera_insert_position)
 
-                # 记录 camera token 在最终序列中的位置 mask, 供 pose 回归 loss 从 LLM 输出取隐状态。
+                # Record the mask of camera-token positions in the final sequence for the pose-regression
+                # loss to pick out the corresponding LLM hidden states.
                 if input_ids is not None and video_grid_thw is not None:
                     try:
                         camdistill_module._last_camera_token_mask = _build_camera_token_mask(
@@ -1779,7 +1786,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             **kwargs,
         )
 
-        # CamDistill/CamInject: 退出 forward
+        # CamDistill/CamInject: leaving forward.
         self._in_forward = False
 
         return Qwen3VLModelOutputWithPast(

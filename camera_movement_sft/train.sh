@@ -1,26 +1,26 @@
 #!/bin/bash
-export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # 默认 decord(可被环境变量覆盖), 避开 torchcodec 的 CUDA(libnvrtc.so.13)版本不匹配
+export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # Default to decord (overridable via env), avoids torchcodec's CUDA (libnvrtc.so.13) version mismatch
 export LD_LIBRARY_PATH="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib:${LD_LIBRARY_PATH}"
 export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${LD_PRELOAD:+:$LD_PRELOAD}"
 # ============================================================================
-# 运镜识别 SFT 训练 - 统一入口脚本
+# Camera-movement SFT training - unified entry script.
 # ============================================================================
-# 支持模型:
-#   1. Qwen3-VL-4B-Instruct  (多模态, ~4B 参数)
-#   2. Qwen3-VL-8B-Instruct  (多模态, ~8B 参数)
-#   3. Qwen3.5-4B            (多模态, ~4B 参数, Linear Attention)
-#   4. Qwen3.5-9B            (多模态, ~9B 参数, Linear Attention)
+# Supported models:
+#   1. Qwen3-VL-4B-Instruct  (multimodal, ~4B params)
+#   2. Qwen3-VL-8B-Instruct  (multimodal, ~8B params)
+#   3. Qwen3.5-4B            (multimodal, ~4B params, Linear Attention)
+#   4. Qwen3.5-9B            (multimodal, ~9B params, Linear Attention)
 #
-# 使用方法:
+# Usage:
 #   bash camera_movement_sft/train.sh <model_name>
 #
-#   model_name 可选值:
-#     qwen3vl-4b   → Qwen/Qwen3-VL-4B-Instruct
-#     qwen3vl-8b   → Qwen/Qwen3-VL-8B-Instruct
-#     qwen35-4b    → Qwen/Qwen3.5-4B
-#     qwen35-9b    → Qwen/Qwen3.5-9B
+#   model_name values:
+#     qwen3vl-4b   -> Qwen/Qwen3-VL-4B-Instruct
+#     qwen3vl-8b   -> Qwen/Qwen3-VL-8B-Instruct
+#     qwen35-4b    -> Qwen/Qwen3.5-4B
+#     qwen35-9b    -> Qwen/Qwen3.5-9B
 #
-# 示例:
+# Examples:
 #   bash camera_movement_sft/train.sh qwen3vl-8b
 #   bash camera_movement_sft/train.sh qwen35-9b
 #   RESUME=true bash camera_movement_sft/train.sh qwen3vl-8b
@@ -28,10 +28,10 @@ export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${L
 
 set -e
 
-# 注意：请在运行脚本前手动激活 conda 环境（conda activate cm）
+# NOTE: activate the conda environment manually before running (conda activate cm).
 
 # ================================
-# 模型选择
+# Model selection
 # ================================
 MODEL_NAME="${1:-qwen3vl-8b}"
 
@@ -69,78 +69,78 @@ case "${MODEL_NAME}" in
         DEEPSPEED_STAGE=${DEEPSPEED_STAGE:-zero2}
         ;;
     *)
-        echo "错误: 未知模型 '${MODEL_NAME}'"
-        echo "支持的模型: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b"
+        echo "Error: unknown model '${MODEL_NAME}'"
+        echo "Supported: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b"
         exit 1
         ;;
 esac
 
 # ================================
-# 路径配置（可通过环境变量覆盖）
+# Path configuration (overridable via env)
 # ================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 
-# 切换到项目根目录（ms-swift 需要在根目录运行）
+# Switch to the project root (ms-swift must be launched from the root).
 cd "${PROJECT_ROOT}"
 
-# 训练数据路径
+# Training data path.
 TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/camera_movement_train_diverse_50k_en.jsonl}"
 
-# 续训开关
+# Resume toggle.
 RESUME="${RESUME:-false}"
 
 if [ "${RESUME}" = "true" ]; then
-    OUTPUT_DIR="${RESUME_OUTPUT_DIR:?请设置 RESUME_OUTPUT_DIR 环境变量指向已有训练目录}"
-    RESUME_CKPT="${RESUME_CHECKPOINT:?请设置 RESUME_CHECKPOINT 环境变量指向 checkpoint 路径}"
+    OUTPUT_DIR="${RESUME_OUTPUT_DIR:?Please set RESUME_OUTPUT_DIR to point at an existing training directory}"
+    RESUME_CKPT="${RESUME_CHECKPOINT:?Please set RESUME_CHECKPOINT to point at a checkpoint path}"
 else
     OUTPUT_DIR="${OUTPUT_DIR:-output/camera_sft_${MODEL_SHORT}}"
     RESUME_CKPT=""
 fi
 
 # ================================
-# 网络代理配置
+# Network proxy configuration
 # ================================
 export http_proxy=http://star-proxy.oa.com:3128
 export https_proxy=http://star-proxy.oa.com:3128
 
 # ================================
-# WandB 配置
+# WandB configuration
 # ================================
 export WANDB_API_KEY="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"
 export WANDB_PROJECT="camera-movement"
 
 # ================================
-# HuggingFace 配置
+# HuggingFace configuration
 # ================================
 export HF_HOME="/apdcephfs_gy2/share_303094921/hunyuan/yujiazhang/dazhaodu/hf"
-export USE_HF="${USE_HF:-1}"  # 默认用 HuggingFace hub(命中 HF_HOME 缓存); 设 USE_HF=0 切回 ModelScope
+export USE_HF="${USE_HF:-1}"  # Default: use HuggingFace hub (hits HF_HOME cache); set USE_HF=0 to fall back to ModelScope
 export HF_TOKEN="${HF_TOKEN:-***REMOVED***}"
 
 # ================================
-# GPU 配置（可通过环境变量覆盖）
+# GPU configuration (overridable via env)
 # ================================
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 
-# 显存优化
+# Memory optimization.
 export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
 
 # ================================
-# 视频处理配置（运镜分析需要更多帧）
+# Video processing configuration (camera-movement analysis needs more frames)
 # ================================
-# 抽帧逻辑: nframes = min(视频时长 × FPS, FPS_MAX_FRAMES)
-# FPS=5: 每秒5帧，捕捉运镜变化
-# FPS_MIN_FRAMES=4: 极短视频最少4帧
-# FPS_MAX_FRAMES=100: 最多100帧，支持20秒视频
-# VIDEO_MAX_PIXELS=100352: 每帧约336×336像素
+# Frame-sampling logic: nframes = min(video_duration * FPS, FPS_MAX_FRAMES)
+# FPS=5: 5 frames per second, captures camera-movement changes.
+# FPS_MIN_FRAMES=4: at least 4 frames even for very short videos.
+# FPS_MAX_FRAMES=100: up to 100 frames, enough for 20s videos.
+# VIDEO_MAX_PIXELS=100352: ~ 336x336 pixels per frame.
 export FPS="${FPS:-5}"
 export FPS_MIN_FRAMES="${FPS_MIN_FRAMES:-4}"
 export FPS_MAX_FRAMES="${FPS_MAX_FRAMES:-100}"
 export VIDEO_MAX_PIXELS="${VIDEO_MAX_PIXELS:-100352}"
 
 # ================================
-# 训练超参数
+# Training hyperparameters
 # ================================
 NUM_EPOCHS="${NUM_EPOCHS:-2}"
 MAX_LENGTH="${MAX_LENGTH:-16384}"
@@ -151,42 +151,42 @@ EVAL_STEPS="${EVAL_STEPS:-1000}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-15}"
 
 # ================================
-# 打印训练信息
+# Print training info
 # ================================
 echo "============================================"
-echo "运镜识别 SFT 训练"
+echo "Camera-movement SFT training"
 echo "============================================"
-echo "模型:           ${MODEL}"
-echo "模型简称:       ${MODEL_SHORT}"
-echo "训练方式:       全参数微调 (full, 冻结 ViT+Aligner)"
-echo "数据:           ${TRAIN_DATA}"
-echo "输出:           ${OUTPUT_DIR}"
+echo "Model:            ${MODEL}"
+echo "Model short:      ${MODEL_SHORT}"
+echo "Training mode:    full parameter fine-tuning (full, ViT+Aligner frozen)"
+echo "Data:             ${TRAIN_DATA}"
+echo "Output:           ${OUTPUT_DIR}"
 if [ "${RESUME}" = "true" ]; then
-    echo "续训 checkpoint: ${RESUME_CKPT}"
+    echo "Resume ckpt:      ${RESUME_CKPT}"
 fi
-echo "GPU 数量:       ${NPROC_PER_NODE}"
-echo "DeepSpeed:      ${DEEPSPEED_STAGE}"
-echo "学习率:         ${LEARNING_RATE}"
-echo "训练轮数:       ${NUM_EPOCHS}"
-echo "有效 Batch:     $((NPROC_PER_NODE * PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION))"
-echo "Max Length:     ${MAX_LENGTH}"
-echo "视频参数:       FPS=${FPS}, MAX_FRAMES=${FPS_MAX_FRAMES}"
+echo "GPUs:             ${NPROC_PER_NODE}"
+echo "DeepSpeed:        ${DEEPSPEED_STAGE}"
+echo "Learning rate:    ${LEARNING_RATE}"
+echo "Epochs:           ${NUM_EPOCHS}"
+echo "Effective batch:  $((NPROC_PER_NODE * PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION))"
+echo "Max length:       ${MAX_LENGTH}"
+echo "Video params:     FPS=${FPS}, MAX_FRAMES=${FPS_MAX_FRAMES}"
 echo "============================================"
 
-# 检查训练数据是否存在
+# Check that training data exists.
 if [ ! -f "${TRAIN_DATA}" ]; then
-    echo "错误: 训练数据文件不存在: ${TRAIN_DATA}"
+    echo "Error: training data file not found: ${TRAIN_DATA}"
     echo ""
-    echo "请先准备数据:"
+    echo "Please prepare data first:"
     echo "  python camera_movement_sft/prepare_human_labels.py"
     echo ""
-    echo "或指定已有数据路径:"
+    echo "Or point to an existing dataset:"
     echo "  DATASET_PATH=/path/to/data.jsonl bash camera_movement_sft/train.sh ${MODEL_NAME}"
     exit 1
 fi
 
 # ================================
-# 构建续训参数
+# Build resume args
 # ================================
 RESUME_ARGS=""
 if [ "${RESUME}" = "true" ]; then
@@ -194,7 +194,7 @@ if [ "${RESUME}" = "true" ]; then
 fi
 
 # ================================
-# 开始训练
+# Start training
 # ================================
 swift sft \
     --model "${MODEL}" \
@@ -232,12 +232,12 @@ swift sft \
     --report_to wandb
 
 echo "============================================"
-echo "训练完成！"
-echo "输出目录: ${OUTPUT_DIR}"
-echo "WandB: 训练日志已同步到 wandb.ai，项目: camera-movement"
+echo "Training finished!"
+echo "Output dir: ${OUTPUT_DIR}"
+echo "WandB: training logs synced to wandb.ai, project: camera-movement"
 echo "============================================"
 
-# ===== 训练完成后，所有节点启动占卡程序 =====
-echo "===== 训练完成，启动占卡程序 ====="
+# ===== After training, launch the GPU-occupation program on every node. =====
+echo "===== Training finished, launching GPU-occupation program ====="
 cd /group/40009/dazhaodu
 python run.py --size 25000 --gpus 0,1,2,3,4,5,6,7 --interval 0.002

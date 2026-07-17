@@ -67,7 +67,7 @@ logger = logging.get_logger(__name__)
 
 
 # ============================================================================
-# CamDistill: Camera Token Injection Helper (与 Qwen3-VL 版共享逻辑)
+# CamDistill: Camera Token Injection Helper (shared logic with the Qwen3-VL version).
 # ============================================================================
 
 def _inject_camera_into_video_embeds(
@@ -76,7 +76,7 @@ def _inject_camera_into_video_embeds(
     video_grid_thw: torch.Tensor,
     spatial_merge_size: int = 2,
 ) -> torch.Tensor:
-    """将 camera_embeds 插入到 video_embeds 中每帧 visual tokens 的最前面。"""
+    """Insert camera_embeds in front of each frame's visual tokens inside video_embeds."""
     results = []
     vis_offset = 0
     cam_offset = 0
@@ -103,8 +103,9 @@ def _expand_video_placeholders(
     spatial_merge_size: int = 2,
 ) -> tuple:
     """
-    Qwen3.5 版本: 视频帧由 timestamps 分隔, 每帧是独立的 video_token 段。
-    对每个连续 video_token 段 (即每帧) 前面插入 1 个额外 placeholder。
+    Qwen3.5 variant: video frames are separated by timestamps; each frame is an independent
+    video_token segment. Insert one extra placeholder in front of every contiguous
+    video_token segment (i.e. each frame).
     """
     B, seq_len = input_ids.shape
     device = input_ids.device
@@ -125,15 +126,15 @@ def _expand_video_placeholders(
                 new_attn[b, :seq_len] = attention_mask[b]
             continue
 
-        # 找到每个连续 video_token 段的起始位置
-        # 在每段起始位置前面插入 1 个 camera placeholder
+        # Find the start position of each contiguous video_token segment.
+        # Insert one camera placeholder in front of every segment start.
         src = 0
         dst = 0
         in_video_segment = False
         for i in range(seq_len):
             is_vid = vid_mask[i].item()
             if is_vid and not in_video_segment:
-                # 新 video segment 开始 → 插入 camera placeholder
+                # A new video segment starts -> insert a camera placeholder.
                 new_input_ids[b, dst] = video_token_id
                 if new_mm_type is not None:
                     new_mm_type[b, dst] = 2
@@ -144,7 +145,7 @@ def _expand_video_placeholders(
             elif not is_vid:
                 in_video_segment = False
 
-            # 复制原始 token
+            # Copy the original token.
             new_input_ids[b, dst] = input_ids[b, i]
             if new_mm_type is not None:
                 new_mm_type[b, dst] = mm_token_type_ids[b, i]
@@ -159,8 +160,8 @@ def _expand_inputs_embeds_for_camera(
     inputs_embeds: torch.Tensor, new_input_ids: torch.Tensor, video_token_id: int, T_total: int,
 ) -> torch.Tensor:
     """
-    Qwen3.5 版本: 在 inputs_embeds 中对应位置插入零占位。
-    根据 new_input_ids 和原始长度差推断插入位置。
+    Qwen3.5 variant: insert zero placeholders at the corresponding positions in inputs_embeds.
+    Infer insertion positions from new_input_ids and the original length difference.
     """
     B, old_len, D = inputs_embeds.shape
     new_len = new_input_ids.shape[1]
@@ -170,9 +171,9 @@ def _expand_inputs_embeds_for_camera(
     new_embeds = torch.zeros(B, new_len, D, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
 
     for b in range(B):
-        # 遍历 new_input_ids, 对于非新插入的位置复制原始 embed
-        # 新插入的位置 = 连续 video segment 开始前的那个 camera placeholder
-        # 这些位置的 embed 为零 (masked_scatter 会覆盖)
+        # Walk over new_input_ids; positions that are not newly inserted copy the original embed.
+        # Newly inserted positions = the camera placeholder inserted before every contiguous
+        # video segment; their embed stays zero (masked_scatter will overwrite it later).
         vid_mask_new = (new_input_ids[b] == video_token_id)
         src_idx = 0
         in_video_segment = False
@@ -181,7 +182,7 @@ def _expand_inputs_embeds_for_camera(
         for dst_idx in range(new_len):
             is_vid = vid_mask_new[dst_idx].item()
             if is_vid and first_in_segment:
-                # 这是插入的 camera placeholder, 跳过 (保持零)
+                # This is an inserted camera placeholder; skip it (keep the zero).
                 first_in_segment = False
                 in_video_segment = True
                 continue
@@ -189,7 +190,7 @@ def _expand_inputs_embeds_for_camera(
                 in_video_segment = False
                 first_in_segment = True
             elif is_vid and not first_in_segment:
-                pass  # 正常 video token, 从 src 复制
+                pass  # regular video token, copy from src
 
             if src_idx < old_len:
                 new_embeds[b, dst_idx] = inputs_embeds[b, src_idx]
@@ -1312,7 +1313,7 @@ class Qwen3_5VisionModel(Qwen3_5PreTrainedModel):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
-        # === CamDistill: 缓存指定 ViT 中间层输出 ===
+        # === CamDistill: cache selected ViT intermediate layer outputs ===
         camdistill_layer_cache = []
         camdistill_extract_layers = getattr(self, '_camdistill_extract_layers', None)
 
@@ -1323,7 +1324,7 @@ class Qwen3_5VisionModel(Qwen3_5PreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-            # CamDistill: 缓存中间层 (detach, 不传梯度回 ViT)
+            # CamDistill: cache the intermediate layer (detached; no gradient flows back to ViT).
             if camdistill_extract_layers is not None and layer_num in camdistill_extract_layers:
                 camdistill_layer_cache.append(hidden_states.detach())
 
@@ -1512,7 +1513,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
         position_temporal = position_temporal.repeat_interleave(llm_grid_h * llm_grid_w) + start_position
         vision_position_ids = torch.stack([position_temporal, position_height, position_width], dim=0)
 
-        # === CamDistill: 每帧前插入 1 个 camera token position (帧中心) ===
+        # === CamDistill: insert one camera-token position (frame center) in front of each frame ===
         if include_camera_token:
             cam_center_h = start_position + llm_grid_h // 2
             cam_center_w = start_position + llm_grid_w // 2
@@ -1609,7 +1610,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
                 # image == 1, video == 2
                 else:
                     grid_thw = next(grid_iters[modality_type])
-                    # CamDistill: 对视频段启用 camera token position
+                    # CamDistill: enable camera-token position for video segments.
                     _include_cam = getattr(self, '_camdistill_enabled', False) and modality_type == 2
                     vision_position_ids = self.get_vision_position_ids(
                         current_pos, grid_thw, 1, spatial_merge_size,
@@ -1804,7 +1805,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
             video_embeds = video_outputs.pooler_output
             video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
 
-            # === CamDistill / CamInject: 注入 camera tokens ===
+            # === CamDistill / CamInject: inject camera tokens ===
             camdistill_module = getattr(self, '_camdistill_module', None)
             vit_intermediates = getattr(self.visual, '_camdistill_layer_cache', [])
             _camdistill_mode = getattr(self, '_camdistill_mode', 'learn')  # 'learn' or 'direct'
@@ -1818,9 +1819,9 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
                 video_embeds = _inject_camera_into_video_embeds(
                     video_embeds, camera_embeds, video_grid_thw,
                     spatial_merge_size=self.config.vision_config.spatial_merge_size)
-                self.visual._camdistill_layer_cache = []  # 清空缓存
+                self.visual._camdistill_layer_cache = []  # clear cache
 
-                # 扩展 input_ids / mm_token_type_ids / attention_mask
+                # Expand input_ids / mm_token_type_ids / attention_mask.
                 T_total = int(video_grid_thw[:, 0].sum().item())
                 input_ids, mm_token_type_ids, attention_mask = _expand_video_placeholders(
                     input_ids, mm_token_type_ids, attention_mask,

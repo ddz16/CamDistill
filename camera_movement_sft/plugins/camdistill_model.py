@@ -1,11 +1,11 @@
 """
 CamDistill: Camera Token Distillation for Spatial-Aware MLLM
 
-核心模块:
-- CameraTokenModule: 交替注意力 Camera Token 模块
-- CameraTokenProjector: Camera Token → LLM 维度投影
-- FrameCrossAttentionLayer: Camera attend 本帧 Visual (单向)
-- GlobalCameraSelfAttentionLayer: 所有帧 Camera 互相 attend (双向)
+Core modules:
+- CameraTokenModule: alternating-attention Camera Token module
+- CameraTokenProjector: project Camera Token to the LLM hidden dimension
+- FrameCrossAttentionLayer: camera attends to visual tokens of the current frame (one-way)
+- GlobalCameraSelfAttentionLayer: camera tokens across frames attend to each other (bidirectional)
 """
 
 import math
@@ -17,13 +17,13 @@ from typing import List, Tuple
 
 class FrameCrossAttentionLayer(nn.Module):
     """
-    Camera Token attend 本帧的 Visual Tokens（单向 Cross-Attention）
+    Camera Token attends to the current frame's visual tokens (one-way cross-attention).
 
-    Q = camera_token (cam_dim, 独立于 visual 维度)
-    K = V = 本帧 visual tokens (vis_dim, 来自冻结 ViT 中间层)
-    K/V 不包含 camera token 自身
+    Q = camera_token (cam_dim, independent from the visual dimension)
+    K = V = visual tokens of the current frame (vis_dim, from a frozen ViT intermediate layer)
+    K/V do not include the camera token itself.
 
-    Q/K/V 都投影到 cam_dim 的 attention 空间; camera 流始终维持在 cam_dim。
+    Q/K/V are all projected into cam_dim attention space; the camera stream stays in cam_dim.
     """
 
     def __init__(self, cam_dim: int = 2048, vis_dim: int = 1024, num_heads: int = 16):
@@ -34,23 +34,24 @@ class FrameCrossAttentionLayer(nn.Module):
         self.cam_dim = cam_dim
         self.vis_dim = vis_dim
 
-        # Q 投影（Camera 专用, cam_dim → cam_dim）
+        # Q projection (camera side, cam_dim -> cam_dim).
         self.q_proj = nn.Linear(cam_dim, cam_dim)
-        # K/V 投影（Visual 专用, vis_dim → cam_dim, 把视觉特征映射到 camera 的 attention 空间）
+        # K/V projection (visual side, vis_dim -> cam_dim; maps visual features into the camera attention space).
         self.k_proj = nn.Linear(vis_dim, cam_dim)
         self.v_proj = nn.Linear(vis_dim, cam_dim)
-        # 输出投影
+        # Output projection.
         self.out_proj = nn.Linear(cam_dim, cam_dim)
 
-        # Pre-Norm（Q 在 cam_dim, K/V 在 vis_dim）
+        # Pre-Norm (Q in cam_dim, K/V in vis_dim).
         self.norm_q = nn.LayerNorm(cam_dim)
         self.norm_kv = nn.LayerNorm(vis_dim)
 
-        # QK-norm (对齐 VGGT: 注意力前对 Q/K 各做 LayerNorm(head_dim), 稳定 attention logits)
+        # QK-norm (aligned with VGGT: apply LayerNorm(head_dim) to Q/K before attention
+        # to stabilize the attention logits).
         self.q_norm = nn.LayerNorm(self.head_dim, eps=1e-5)
         self.k_norm = nn.LayerNorm(self.head_dim, eps=1e-5)
 
-        # FFN（cam_dim）
+        # FFN (cam_dim).
         self.norm_ffn = nn.LayerNorm(cam_dim)
         self.ffn = nn.Sequential(
             nn.Linear(cam_dim, cam_dim * 4),
@@ -58,7 +59,7 @@ class FrameCrossAttentionLayer(nn.Module):
             nn.Linear(cam_dim * 4, cam_dim),
         )
 
-        # LayerScale (init=0.01, 让初始时残差贡献小)
+        # LayerScale (init=0.01 so the residual contribution starts small).
         self.ls_attn = nn.Parameter(torch.ones(cam_dim) * 0.01)
         self.ls_ffn = nn.Parameter(torch.ones(cam_dim) * 0.01)
 
@@ -70,12 +71,12 @@ class FrameCrossAttentionLayer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            cam_tokens: (T_total, 1, cam_dim) — 所有 temporal groups 的 camera tokens
-            vit_features: (total_patches, vis_dim) — 冻结 ViT 某层输出
-            frame_sizes: list[int] — 每帧的 patch 数量
+            cam_tokens: (T_total, 1, cam_dim) - camera tokens for all temporal groups.
+            vit_features: (total_patches, vis_dim) - the output of a frozen ViT layer.
+            frame_sizes: list[int] - number of patches per frame.
 
         Returns:
-            cam_tokens: (T_total, 1, cam_dim) — 更新后的 camera tokens
+            cam_tokens: (T_total, 1, cam_dim) - updated camera tokens.
         """
         if cam_tokens.numel() == 0:
             return cam_tokens
@@ -91,7 +92,8 @@ class FrameCrossAttentionLayer(nn.Module):
                 f"vit_features.shape[0]={vit_features.shape[0]}"
             )
 
-        # 分组向量化: 先按 frame_size 分组，同组一次 SDPA，避免逐帧 Python 循环。
+        # Grouped vectorization: bucket by frame_size and run one SDPA per bucket,
+        # avoiding per-frame Python loops.
         frame_size_to_indices = {}
         for idx, size in enumerate(frame_sizes):
             key = int(size)
@@ -125,10 +127,10 @@ class FrameCrossAttentionLayer(nn.Module):
 
             attn_output[indices] = out
 
-        # Residual + LayerScale
+        # Residual + LayerScale.
         cam_tokens = cam_tokens + self.ls_attn * attn_output
 
-        # FFN + Residual + LayerScale
+        # FFN + Residual + LayerScale.
         ffn_out = self.ffn(self.norm_ffn(cam_tokens))
         cam_tokens = cam_tokens + self.ls_ffn * ffn_out
 
@@ -137,12 +139,12 @@ class FrameCrossAttentionLayer(nn.Module):
 
 class GlobalCameraSelfAttentionLayer(nn.Module):
     """
-    所有帧的 Camera Tokens 互相 attend（完全双向 Self-Attention）
+    Camera tokens across all frames attend to each other (fully bidirectional self-attention).
 
-    Q = K = V = 所有帧的 camera tokens（包含自身）
-    按视频隔离：不同视频的 camera tokens 不互相 attend
+    Q = K = V = camera tokens of all frames (including itself).
+    Isolation per video: camera tokens from different videos never attend to each other.
 
-    这是学习帧间几何关系的关键步骤。
+    This is the key step for learning inter-frame geometric relationships.
     """
 
     def __init__(self, cam_dim: int = 2048, num_heads: int = 16):
@@ -152,18 +154,18 @@ class GlobalCameraSelfAttentionLayer(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.cam_dim = cam_dim
 
-        # 标准 Self-Attention QKV
+        # Standard self-attention QKV.
         self.qkv = nn.Linear(cam_dim, cam_dim * 3)
         self.out_proj = nn.Linear(cam_dim, cam_dim)
 
-        # Pre-Norm
+        # Pre-Norm.
         self.norm = nn.LayerNorm(cam_dim)
 
-        # QK-norm (对齐 VGGT)
+        # QK-norm (aligned with VGGT).
         self.q_norm = nn.LayerNorm(self.head_dim, eps=1e-5)
         self.k_norm = nn.LayerNorm(self.head_dim, eps=1e-5)
 
-        # FFN
+        # FFN.
         self.norm_ffn = nn.LayerNorm(cam_dim)
         self.ffn = nn.Sequential(
             nn.Linear(cam_dim, cam_dim * 4),
@@ -171,7 +173,7 @@ class GlobalCameraSelfAttentionLayer(nn.Module):
             nn.Linear(cam_dim * 4, cam_dim),
         )
 
-        # LayerScale
+        # LayerScale.
         self.ls_attn = nn.Parameter(torch.ones(cam_dim) * 0.01)
         self.ls_ffn = nn.Parameter(torch.ones(cam_dim) * 0.01)
 
@@ -182,8 +184,8 @@ class GlobalCameraSelfAttentionLayer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            cam_tokens: (T_total, 1, D) — 所有视频所有帧的 camera tokens
-            video_sizes: list[int] — 每个视频的 temporal group 数
+            cam_tokens: (T_total, 1, D) - camera tokens for every frame of every video.
+            video_sizes: list[int] - number of temporal groups per video.
 
         Returns:
             cam_tokens: (T_total, 1, D)
@@ -195,7 +197,7 @@ class GlobalCameraSelfAttentionLayer(nn.Module):
         for cam_seq in cam_splits:
             S = cam_seq.shape[0]
 
-            # Self-Attention (SDPA, 数值更稳更快)
+            # Self-attention (SDPA, numerically more stable and faster).
             normed = self.norm(cam_seq)  # (S, D)
             qkv = self.qkv(normed).reshape(S, 3, self.num_heads, self.head_dim)
             qkv = qkv.permute(1, 2, 0, 3)  # (3, H, S, d)
@@ -207,10 +209,10 @@ class GlobalCameraSelfAttentionLayer(nn.Module):
             out = out.transpose(0, 1).reshape(S, self.cam_dim)  # (S, cam_dim)
             out = self.out_proj(out)
 
-            # Residual + LayerScale
+            # Residual + LayerScale.
             cam_seq = cam_seq + self.ls_attn * out
 
-            # FFN
+            # FFN.
             ffn_out = self.ffn(self.norm_ffn(cam_seq))
             cam_seq = cam_seq + self.ls_ffn * ffn_out
 
@@ -221,8 +223,8 @@ class GlobalCameraSelfAttentionLayer(nn.Module):
 
 class CameraTokenProjector(nn.Module):
     """
-    将 Camera Token 从 ViT 维度投影到 LLM 维度
-    结构模仿 Qwen3-VL Merger 的 2层MLP
+    Project camera tokens from the ViT dimension to the LLM dimension.
+    The structure mirrors the two-layer MLP in Qwen3-VL's Merger.
     """
 
     def __init__(self, in_dim: int = 1152, hidden_dim: int = 2304, out_dim: int = 3584):
@@ -247,27 +249,31 @@ class CameraTokenProjector(nn.Module):
 
 class CameraTokenModule(nn.Module):
     """
-    交替注意力 Camera Token 模块
+    Alternating-attention Camera Token module.
 
-    结构: [Frame CrossAttn → Global SelfAttn] × depth
-    从冻结 ViT 中间层输出聚合空间信息，产出 camera token 用于蒸馏和 LLM 输入。
+    Structure: [Frame CrossAttn -> Global SelfAttn] x depth.
+    Aggregates spatial information from frozen ViT intermediate layers and produces the
+    camera token used both for distillation and as an LLM input.
 
-    结构镜像 VGGT-omega: camera 流在 stream_dim (= ViT hidden, 4B=1024) 上做交替注意力,
-    最后一层同时取「帧内 cross-attn 后」和「帧间 self-attn 后」两个 camera 表征, concat 成
-    2*stream_dim (=2048) 作为 camera_features —— 与 VGGT 缓存的
-    torch.cat([frame_tokens, tokens]) (帧内半 + 帧间半) 逐段对应。
+    The structure mirrors VGGT-omega: the camera stream stays on stream_dim (= ViT hidden,
+    e.g. 1024 for the 4B ViT) and performs alternating attention. At the last layer, both
+    the "post intra-frame cross-attn" and "post inter-frame self-attn" camera representations
+    are concatenated into 2*stream_dim (= 2048) as camera_features, matching the segments in
+    VGGT's cached torch.cat([frame_tokens, tokens]) (intra-frame half + inter-frame half).
 
-      - camera token / 交替注意力 / 单分支表征都在 stream_dim (=1024)
-      - visual K/V 输入也是 stream_dim (ViT, 4B=1024), cross-attn 对称
-      - camera_features = concat(帧内分支, 帧间分支) = 2*stream_dim (=2048), 直接对齐 VGGT, 无需额外投影
-      - camera_proj: 2*stream_dim → llm_hidden_dim, 产出注入 LLM 的 camera embed
+      - camera token / alternating attention / single-branch representation stays at stream_dim (=1024)
+      - visual K/V inputs are also stream_dim (ViT, 1024 for 4B); cross-attention is symmetric
+      - camera_features = concat(intra-frame branch, inter-frame branch) = 2*stream_dim (=2048),
+        directly aligned with VGGT with no extra projection required
+      - camera_proj: 2*stream_dim -> llm_hidden_dim, produces the camera embed injected into the LLM
 
     Args:
-        hidden_dim: ViT hidden dimension (K/V 输入 = camera 流维度; 4B=1024)
-        num_heads: attention heads
-        depth: 交替注意力轮数
-        llm_hidden_dim: LLM hidden dimension (4B=2560, 8B=4096)
-        cam_dim: camera 流单分支维度; 默认 = hidden_dim。camera_features = 2*cam_dim。
+        hidden_dim: ViT hidden dimension (K/V input == camera stream dimension; 1024 for 4B).
+        num_heads: attention heads.
+        depth: number of alternating-attention rounds.
+        llm_hidden_dim: LLM hidden dimension (2560 for 4B, 4096 for 8B).
+        cam_dim: single-branch camera stream dimension; defaults to hidden_dim.
+                 camera_features = 2 * cam_dim.
     """
 
     def __init__(
@@ -279,43 +285,43 @@ class CameraTokenModule(nn.Module):
         cam_dim: int = None,
     ):
         super().__init__()
-        stream_dim = cam_dim if cam_dim is not None else hidden_dim  # 单分支维度 (=1024)
+        stream_dim = cam_dim if cam_dim is not None else hidden_dim  # single-branch dim (=1024)
         self.hidden_dim = hidden_dim      # ViT visual dim (K/V)
-        self.stream_dim = stream_dim      # camera 流单分支维度
-        self.feature_dim = 2 * stream_dim  # concat 后维度 (=2048, 匹配 VGGT)
+        self.stream_dim = stream_dim      # single-branch camera stream dim
+        self.feature_dim = 2 * stream_dim  # concatenated feature dim (=2048, matches VGGT)
         self.depth = depth
 
-        # 双 Camera Token（与 VGGT 一致）
-        # [:, 0] = 第一个 temporal group 专用（世界坐标系锚点）
-        # [:, 1] = 其他 temporal groups 共享（表达相对变化）
+        # Dual camera token (matches VGGT):
+        #   [:, 0] = variant for the first temporal group (anchors the world coordinate system)
+        #   [:, 1] = variant shared by other temporal groups (expresses relative change)
         self.camera_token = nn.Parameter(torch.zeros(1, 2, 1, stream_dim))
-        nn.init.normal_(self.camera_token, std=1e-3)  # 对齐 VGGT-omega init
+        nn.init.normal_(self.camera_token, std=1e-3)  # matches VGGT-omega init
 
-        # Frame Cross-Attention 层 (Q=camera stream_dim, K/V=visual hidden_dim)
+        # Frame cross-attention layers (Q = camera stream_dim, K/V = visual hidden_dim).
         self.frame_layers = nn.ModuleList(
             [FrameCrossAttentionLayer(cam_dim=stream_dim, vis_dim=hidden_dim, num_heads=num_heads)
              for _ in range(depth)]
         )
 
-        # Global Self-Attention 层 (stream_dim)
+        # Global self-attention layers (stream_dim).
         self.global_layers = nn.ModuleList(
             [GlobalCameraSelfAttentionLayer(cam_dim=stream_dim, num_heads=num_heads) for _ in range(depth)]
         )
 
-        # Camera Token → LLM 投影 (2*stream_dim → llm_hidden_dim)
+        # Camera Token -> LLM projection (2 * stream_dim -> llm_hidden_dim).
         self.camera_proj = CameraTokenProjector(
             in_dim=self.feature_dim,
             hidden_dim=self.feature_dim,
             out_dim=llm_hidden_dim,
         )
 
-        # 用于保存中间输出（供 loss 使用）
-        self._last_camera_features = None  # (T_total, 2*stream_dim) 直接用于蒸馏 loss, 对齐 VGGT
+        # Intermediate outputs (consumed by the loss).
+        self._last_camera_features = None  # (T_total, 2*stream_dim), directly used by distill loss (matches VGGT)
         self._last_camera_embeds = None  # (T_total, llm_hidden_dim) for LLM input
         self._last_video_ids = []
         self._last_video_grid_thw = None
 
-        # 合理初始化: Linear 用 Xavier, bias 置零 (优于 PyTorch 默认的 kaiming a=√5)
+        # Reasonable init: Xavier for Linear, zero bias (better than PyTorch's default kaiming a=sqrt(5)).
         self._init_linear_weights()
 
     def _init_linear_weights(self) -> None:
@@ -327,27 +333,27 @@ class CameraTokenModule(nn.Module):
 
     def prepare_camera_tokens(self, grid_thw: torch.Tensor) -> torch.Tensor:
         """
-        为每个 temporal group 分配正确的 camera token 变体
+        Assign the correct camera-token variant to each temporal group.
 
         Args:
-            grid_thw: (num_videos, 3) tensor — (T, H, W) per video
+            grid_thw: (num_videos, 3) tensor - (T, H, W) per video.
 
         Returns:
-            (T_total, 1, hidden_dim) — 每个 temporal group 一个 camera token
+            (T_total, 1, hidden_dim) - one camera token per temporal group.
         """
         cam_tokens_list = []
         for t, h, w in grid_thw.tolist():
             t = int(t)
             if t >= 1:
-                # 第一个 temporal group 用 variant 0
+                # The first temporal group uses variant 0.
                 first = self.camera_token[:, 0, :, :]  # (1, 1, D)
-                cam_tokens_list.append(first.squeeze(0))  # (1, D) → will be (1, 1, D) after stack
+                cam_tokens_list.append(first.squeeze(0))  # (1, D) -> becomes (1, 1, D) after stacking
             if t > 1:
-                # 其余用 variant 1
+                # The rest use variant 1.
                 others = self.camera_token[:, 1, :, :].expand(1, t - 1, -1)  # (1, t-1, D)
                 cam_tokens_list.append(others.squeeze(0))  # (t-1, D)
 
-        # 拼接所有 temporal groups 的 camera tokens
+        # Concatenate camera tokens for all temporal groups.
         all_cam = torch.cat(cam_tokens_list, dim=0)  # (T_total, D)
         return all_cam.unsqueeze(1)  # (T_total, 1, D)
 
@@ -358,15 +364,16 @@ class CameraTokenModule(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            vit_layer_outputs: list of depth tensors, each (total_patches, hidden_dim)
-                               从 ViT 各层 hook 出的中间特征（已 detach）
-            grid_thw: (num_videos, 3) tensor
+            vit_layer_outputs: list of `depth` tensors, each (total_patches, hidden_dim);
+                               intermediate features hooked from ViT layers (already detached).
+            grid_thw: (num_videos, 3) tensor.
 
         Returns:
-            camera_embeds: (T_total, llm_hidden_dim) — 投影后, 可直接进 LLM
-            camera_features: (T_total, 2*stream_dim) — concat(帧内分支, 帧间分支), 用于蒸馏 loss
+            camera_embeds: (T_total, llm_hidden_dim) - projected, ready to feed into the LLM.
+            camera_features: (T_total, 2*stream_dim) - concat(intra-frame branch, inter-frame branch),
+                             used by the distillation loss.
         """
-        # 计算每帧 patch 数和视频 temporal group 数
+        # Compute patches per frame and temporal groups per video.
         frame_sizes = []
         video_sizes = []
         for t, h, w in grid_thw.tolist():
@@ -376,36 +383,37 @@ class CameraTokenModule(nn.Module):
             for _ in range(t):
                 frame_sizes.append(patches_per_frame)
 
-        # 准备 camera tokens
+        # Prepare camera tokens.
         cam_tokens = self.prepare_camera_tokens(grid_thw)  # (T_total, 1, stream_dim)
 
-        # 统一 dtype: ViT 中间层可能是 bfloat16, 但模块权重可能是 float32
+        # Unify dtype: ViT intermediate outputs may be bfloat16 while module weights may be float32.
         target_dtype = self.camera_proj.linear_fc1.weight.dtype
         cam_tokens = cam_tokens.to(target_dtype)
 
-        # 交替注意力; 最后一层单独留下「帧内 cross-attn 后」的 camera 表征作为帧内分支
+        # Alternating attention; at the last layer keep the "post intra-frame cross-attn" camera
+        # representation as the intra-frame branch.
         cam_after_frame = None
         for layer_idx in range(self.depth):
-            # 选择 ViT 中间层输出（如果层数不够就复用最后一层）
+            # Choose the ViT intermediate layer output (reuse the last one if there are not enough).
             vit_idx = min(layer_idx, len(vit_layer_outputs) - 1)
             vit_features = vit_layer_outputs[vit_idx].to(target_dtype)  # (total_patches, hidden_dim)
 
-            # Step A: Frame Cross-Attention (帧内, 偏空间)
+            # Step A: Frame Cross-Attention (intra-frame, spatially oriented).
             cam_tokens = self.frame_layers[layer_idx](cam_tokens, vit_features, frame_sizes)
             if layer_idx == self.depth - 1:
-                cam_after_frame = cam_tokens  # (T_total, 1, stream_dim) 帧内分支
+                cam_after_frame = cam_tokens  # (T_total, 1, stream_dim), intra-frame branch
 
-            # Step B: Global Camera Self-Attention (帧间, 偏时序)
+            # Step B: Global Camera Self-Attention (inter-frame, temporally oriented).
             cam_tokens = self.global_layers[layer_idx](cam_tokens, video_sizes)
 
-        # 双分支 concat, 镜像 VGGT 的 torch.cat([frame_tokens, tokens])
-        cam_frame = cam_after_frame.squeeze(1)   # (T_total, stream_dim) 帧内半
-        cam_global = cam_tokens.squeeze(1)       # (T_total, stream_dim) 帧间半
+        # Dual-branch concat mirrors VGGT's torch.cat([frame_tokens, tokens]).
+        cam_frame = cam_after_frame.squeeze(1)   # (T_total, stream_dim), intra-frame half
+        cam_global = cam_tokens.squeeze(1)       # (T_total, stream_dim), inter-frame half
         camera_features = torch.cat([cam_frame, cam_global], dim=-1)  # (T_total, 2*stream_dim)
 
         camera_embeds = self.camera_proj(camera_features)  # (T_total, llm_hidden_dim)
 
-        # 保存供 loss 使用
+        # Save for use by the loss.
         self._last_camera_features = camera_features
         self._last_camera_embeds = camera_embeds
 
@@ -418,23 +426,23 @@ def inject_camera_tokens_into_embeds(
     grid_thw: torch.Tensor,
 ) -> torch.Tensor:
     """
-    将 camera_embeds 插入到 image_embeds 中每帧 visual tokens 的最前面。
+    Insert camera_embeds in front of each frame's visual tokens inside image_embeds.
 
-    修改前 (每帧 T 个 temporal group, 每组 H*W 个 patch):
+    Before (T temporal groups per frame, H*W patches per group):
         image_embeds = [vis_1, vis_2, ..., vis_{H*W}, vis_1, ..., vis_{H*W}, ...]
-        总长度 = sum(T_i * H_i * W_i)
+        total length = sum(T_i * H_i * W_i)
 
-    修改后 (每个 temporal group 前面插一个 camera token):
+    After (insert one camera token in front of each temporal group):
         image_embeds = [CAM_1, vis_1, ..., vis_{H*W}, CAM_2, vis_1, ..., vis_{H*W}, ...]
-        总长度 = sum(T_i * (1 + H_i * W_i))
+        total length = sum(T_i * (1 + H_i * W_i))
 
     Args:
-        image_embeds: (N_total_vis, llm_dim) — Qwen3-VL visual output (经过 merger)
-        camera_embeds: (T_total, llm_dim) — CameraTokenModule 投影后的 camera tokens
-        grid_thw: (num_videos, 3) — 每个视频的 (T, H, W)
+        image_embeds: (N_total_vis, llm_dim) - Qwen3-VL visual output (after merger).
+        camera_embeds: (T_total, llm_dim) - camera tokens produced by CameraTokenModule.
+        grid_thw: (num_videos, 3) - (T, H, W) per video.
 
     Returns:
-        new_image_embeds: (N_total_vis + T_total, llm_dim) — 插入 camera token 后
+        new_image_embeds: (N_total_vis + T_total, llm_dim) - after inserting camera tokens.
     """
     llm_dim = image_embeds.shape[-1]
     device = image_embeds.device
@@ -449,12 +457,12 @@ def inject_camera_tokens_into_embeds(
         patches_per_frame = h * w
 
         for frame_idx in range(t):
-            # 取该帧的 camera token
+            # Pick the camera token for this frame.
             cam = camera_embeds[cam_offset].unsqueeze(0)  # (1, llm_dim)
-            # 取该帧的 visual tokens
+            # Pick the visual tokens for this frame.
             vis = image_embeds[vis_offset: vis_offset + patches_per_frame]  # (H*W, llm_dim)
 
-            # camera token 在前, visual tokens 在后
+            # Camera token first, visual tokens after.
             results.append(cam)
             results.append(vis)
 
@@ -469,19 +477,20 @@ def build_camera_position_ids(
     spatial_merge_size: int = 2,
 ) -> torch.Tensor:
     """
-    为每帧的 camera token 生成 M-RoPE position_ids。
-    Camera token 的位置编码为该帧的空间中心。
+    Generate M-RoPE position_ids for the camera token of each frame.
+    The camera token is placed at the spatial center of its frame.
 
     Args:
-        grid_thw: (num_videos, 3) — (T, H_grid, W_grid) per video
-                  注意: H_grid, W_grid 是 merge 后的 grid 尺寸 (已除以 spatial_merge_size)
-        spatial_merge_size: Qwen3-VL 的 spatial merge size (默认2)
+        grid_thw: (num_videos, 3) - (T, H_grid, W_grid) per video.
+                  Note: H_grid, W_grid are the post-merge grid sizes (already divided by
+                  spatial_merge_size).
+        spatial_merge_size: Qwen3-VL's spatial merge size (default 2).
 
     Returns:
-        camera_pos_ids: (3, T_total) — [temporal, height, width] for each camera token
-                        temporal = 该帧的时间位置
-                        height = H_grid // 2 (中心)
-                        width = W_grid // 2 (中心)
+        camera_pos_ids: (3, T_total) - [temporal, height, width] for each camera token.
+                        temporal = the frame's temporal position
+                        height   = H_grid // 2 (center)
+                        width    = W_grid // 2 (center)
     """
     temporal_ids = []
     height_ids = []

@@ -1,10 +1,10 @@
 """
-CamDistill Loss: Camera Token 蒸馏损失函数
+CamDistill Loss: Camera Token distillation loss function.
 
-结合标准 SFT Cross-Entropy Loss 和 Camera Token 余弦蒸馏 Loss。
-通过 --loss_type camdistill 激活。
+Combines standard SFT cross-entropy loss with a camera-token cosine distillation loss.
+Activated via --loss_type camdistill.
 
-VGGT 缓存: 每个视频一个 {video_id}.pt 文件, 内容为 dict:
+VGGT cache: one {video_id}.pt file per video, each a dict:
   {"camera_features": Tensor(S, 2048) float16}
 """
 
@@ -17,10 +17,10 @@ from swift.loss import BaseLoss, loss_map
 
 class CamDistillLoss(BaseLoss):
     """
-    CamDistill 训练 Loss = L_sft + lambda_cam * L_distill
+    CamDistill training loss = L_sft + lambda_cam * L_distill
 
-    L_sft:     标准 next-token prediction cross-entropy
-    L_distill: Camera Token 与 VGGT target 的余弦相似度 loss (1 - cos_sim)
+    L_sft:     standard next-token prediction cross-entropy
+    L_distill: cosine similarity loss between camera token and VGGT target (1 - cos_sim)
     """
 
     def __init__(self, args=None, trainer=None):
@@ -29,14 +29,17 @@ class CamDistillLoss(BaseLoss):
         else:
             super().__init__()
 
-        # 蒸馏权重 (常数): total_loss = sft_loss + lambda_cam * distill_loss
+        # Distillation weight (constant): total_loss = sft_loss + lambda_cam * distill_loss
         self.lambda_cam = float(os.environ.get("CAMDISTILL_LAMBDA", "0.3"))
-        # 前几步关闭蒸馏，先让 LM/SFT 稳定（避免初期蒸馏梯度主导导致不收敛）
+        # Disable distillation for the first few steps so LM/SFT can stabilize
+        # (avoids early distillation gradients dominating and preventing convergence).
         self.lambda_warmup_steps = int(os.environ.get("CAMDISTILL_WARMUP_STEPS", "200"))
 
-        # per_half: camera_features 是 [帧内半 ; 帧间半] concat, 按半各算 cosine 再平均 (默认开),
-        #   对齐 VGGT 的两段结构, 避免整段归一化时被范数大的一半主导。
-        #   置 0 则对整段 (2048) 整体计算。
+        # per_half: camera_features is [intra-frame half ; inter-frame half] concat.
+        #   With per_half enabled (default), cosine is computed on each half separately and averaged;
+        #   this aligns with VGGT's two-part structure and avoids the larger-norm half dominating
+        #   the full-vector normalization.
+        #   Setting it to 0 falls back to computing over the entire 2048-dim vector.
         self.per_half = os.environ.get("CAMDISTILL_PER_HALF", "1").strip().lower() in {'1', 'true', 'yes', 'on'}
         self.vggt_cache_dir = os.environ.get("VGGT_CACHE_DIR", "")
         self.strict_cache = os.environ.get('CAMDISTILL_STRICT_CACHE', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -46,7 +49,7 @@ class CamDistillLoss(BaseLoss):
         pred_aligned: torch.Tensor,
         target: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """在给定的 (N, D) 向量对上算一次 cosine loss = 1 - cos_sim."""
+        """Compute one cosine loss = 1 - cos_sim over the given (N, D) vector pair."""
         pred_norm = F.normalize(pred_aligned, dim=-1)
         target_norm = F.normalize(target, dim=-1)
         cos_sim = (pred_norm * target_norm).sum(dim=-1)
@@ -60,12 +63,13 @@ class CamDistillLoss(BaseLoss):
         if not self.per_half:
             return self._metric_once(pred_aligned, target)
 
-        # 按半计算: camera_features = [帧内半 ; 帧间半], 各自对齐 VGGT 对应半再平均。
+        # Per-half computation: camera_features = [intra-frame half ; inter-frame half].
+        # Each half is aligned with the corresponding VGGT half; results are averaged.
         d = pred_aligned.shape[-1]
         if d % 2 != 0:
             raise RuntimeError(
-                f"[CamDistillLoss] per_half 需要偶数维度, got dim={d}. "
-                "设 CAMDISTILL_PER_HALF=0 用整段计算。"
+                f"[CamDistillLoss] per_half requires an even dimension, got dim={d}. "
+                "Set CAMDISTILL_PER_HALF=0 to use full-vector computation."
             )
         h = d // 2
         loss_a, cos_a = self._metric_once(pred_aligned[..., :h], target[..., :h])
@@ -82,7 +86,7 @@ class CamDistillLoss(BaseLoss):
 
     @staticmethod
     def _align_target_to_t_model(target: torch.Tensor, t_model: int) -> torch.Tensor:
-        """将 cache target 的帧数对齐到模型 temporal group 数。"""
+        """Align the cache target's frame count to the model's temporal group count."""
         if t_model <= 0:
             raise RuntimeError(f"[CamDistillLoss] invalid t_model={t_model}")
         if target is None or target.numel() == 0:
@@ -139,10 +143,11 @@ class CamDistillLoss(BaseLoss):
 
     def get_vggt_target(self, video_id: str, device: torch.device) -> Optional[torch.Tensor]:
         """
-        从缓存加载 VGGT camera token features。
-        每次从磁盘读取，不做内存缓存（1 epoch 每个样本只访问一次）。
+        Load VGGT camera token features from cache.
+        Reads from disk each time (no in-memory cache); across a single training epoch
+        each sample is accessed only once.
 
-        返回: Tensor (S, 2048) 或 None
+        Returns: Tensor (S, 2048) or None.
         """
         if not self.vggt_cache_dir:
             return None
@@ -152,7 +157,7 @@ class CamDistillLoss(BaseLoss):
             return None
 
         data = torch.load(cache_path, map_location="cpu", weights_only=True)
-        # 兼容新旧格式
+        # Backwards compatibility with the legacy tensor-only format.
         if isinstance(data, dict):
             features = data["camera_features"]
         else:
@@ -171,19 +176,20 @@ class CamDistillLoss(BaseLoss):
         **kwargs,
     ):
         """
-        计算总 loss = SFT loss + lambda * distillation loss
+        Compute total loss = SFT loss + lambda * distillation loss.
 
         Args:
-            outputs: model forward 输出 (含 logits)
+            outputs: model forward output (contains logits)
             labels: target token ids
-            trainer: Seq2SeqTrainer 实例
+            trainer: Seq2SeqTrainer instance
         """
-        # ===== 1. 标准 SFT Loss =====
+        # ===== 1. Standard SFT loss =====
         logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
 
-        # 归一化用真实 token 数(非零权重和), 保持 loss 量级可比
+        # Normalize by the real token count (sum of non-zero weights) so the loss magnitude
+        # stays comparable across batches.
         if num_items_in_batch is None:
             num_items_in_batch = (shift_labels != -100).sum().clamp(min=1)
 
@@ -193,7 +199,7 @@ class CamDistillLoss(BaseLoss):
             shift_labels.view(-1),
         ) / num_items_in_batch
 
-        # ===== 2. Camera Token 蒸馏 Loss =====
+        # ===== 2. Camera Token distillation loss =====
         global_step = int(getattr(getattr(trainer, 'state', None), 'global_step', 0) or 0)
         if self.lambda_warmup_steps > 0 and global_step < self.lambda_warmup_steps:
             lambda_scale = 0.0
@@ -204,7 +210,7 @@ class CamDistillLoss(BaseLoss):
         has_distill = False
         cos_sim_mean = None
 
-        # camera 模块: CamDistill 挂在 model.camdistill, CamInject 挂在 model.caminject_adapter
+        # Camera module: CamDistill hangs on model.camdistill, CamInject hangs on model.caminject_adapter.
         camera_module = None
         if trainer is not None:
             camera_module = getattr(trainer.model, "camdistill", None) or \
@@ -239,23 +245,23 @@ class CamDistillLoss(BaseLoss):
                             f"pred={camera_features.shape[0]} vs target={camera_target.shape[0]}"
                         )
 
-                    # camera_features 现在直接是 cam_dim=2048, 与 VGGT target 同维, 无需再投影。
-                    # 蒸馏损失在 float32 下计算更稳定。
+                    # camera_features is already cam_dim=2048 (same as VGGT target); no further projection.
+                    # The distillation loss is computed in float32 for numerical stability.
                     camera_pred = camera_features.to(torch.float32)
                     camera_target = camera_target.to(device=camera_pred.device, dtype=torch.float32)
                     if camera_pred.shape[-1] != camera_target.shape[-1]:
                         raise RuntimeError(
                             f"[CamDistillLoss] feature/target dim mismatch: "
                             f"pred_dim={camera_pred.shape[-1]} vs target_dim={camera_target.shape[-1]} "
-                            "(camera_features 应为 cam_dim=2048, 与 VGGT 一致)"
+                            "(camera_features must be cam_dim=2048 to match VGGT)"
                         )
                     distill_loss, cos_sim_mean = self._compute_distill_loss(camera_pred, camera_target)
                     has_distill = True
 
-        # ===== 3. 总 Loss =====
+        # ===== 3. Total loss =====
         total_loss = sft_loss + lambda_scale * distill_loss
 
-        # ===== 4. 日志 =====
+        # ===== 4. Logging =====
         if trainer is not None and hasattr(trainer, "custom_metrics"):
             mode = "train" if trainer.model.training else "eval"
             trainer.custom_metrics[mode]["sft_loss"].update(sft_loss.detach())
@@ -269,5 +275,5 @@ class CamDistillLoss(BaseLoss):
 
         return total_loss
 
-# 注册到 ms-swift loss_map
+# Register into the ms-swift loss_map.
 loss_map["camdistill"] = CamDistillLoss

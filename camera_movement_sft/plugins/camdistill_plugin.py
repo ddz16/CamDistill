@@ -1,12 +1,13 @@
 """
-CamDistill Plugin: ms-swift 外部插件入口
+CamDistill Plugin: ms-swift external plugin entry point.
 
-通过 --external_plugins camera_movement_sft/plugins/camdistill_plugin.py 加载。
-注册自定义模型 loader 和蒸馏 loss。
+Loaded via --external_plugins camera_movement_sft/plugins/camdistill_plugin.py.
+Registers a custom model loader and distillation loss.
 
-Camera Token 注入方式:
-  使用修改版的 modeling_qwen3_vl_camdistill.py (从 transformers 复制后修改),
-  在 forward 中直接完成 camera token 的独立插入 (每帧 visual tokens 前插 1 个)。
+Camera Token injection strategy:
+  Uses a modified modeling_qwen3_vl_camdistill.py (copied and patched from transformers)
+  that performs standalone camera-token insertion inside forward (one token in front of
+  each frame's visual tokens).
 """
 
 import os
@@ -17,18 +18,18 @@ import torch.nn as nn
 from contextlib import contextmanager
 from typing import List
 
-# 确保 plugins 目录在 path 中
+# Make sure the plugins directory is on sys.path.
 _plugin_dir = os.path.dirname(os.path.abspath(__file__))
 if _plugin_dir not in sys.path:
     sys.path.insert(0, _plugin_dir)
 
 # ============================================================
-# 1. 注册自定义 Loss
+# 1. Register the custom loss
 # ============================================================
 from camdistill_loss import CamDistillLoss  # noqa: F401 (side-effect: registers in loss_map)
 
 # ============================================================
-# 2. 注册自定义 Model Loader (带 CamDistill 模块)
+# 2. Register the custom model loader (with CamDistill module)
 # ============================================================
 from swift.model import ModelMeta, ModelGroup, Model, register_model
 from swift.model.models.qwen import Qwen3VLLoader
@@ -37,7 +38,7 @@ from swift.template.constant import TemplateType
 
 from camdistill_model import CameraTokenModule
 
-# 导入修改版模型的 forward 和辅助函数 (用于 monkey-patch)
+# Import the modified model's forward and helper functions (used for monkey-patching).
 import types
 from modeling_qwen3_vl_camdistill import (
     _inject_camera_into_video_embeds,
@@ -47,7 +48,7 @@ from modeling_qwen3_vl_camdistill import (
 
 
 def _resolve_camdistill_extract_layers(vit_depth: int, camdistill_depth: int) -> List[int]:
-    """解析要缓存的 ViT 层索引。"""
+    """Resolve the ViT layer indices to cache."""
     raw_layers = os.environ.get('CAMDISTILL_EXTRACT_LAYERS', '').strip()
     if not raw_layers:
         extract_layers = [
@@ -93,8 +94,8 @@ def _expand_labels_for_camera(
     tokens_per_frame: int = 1,
 ) -> torch.Tensor:
     """
-    在 labels 中为每帧的 K=tokens_per_frame 个 camera token 位置插入 -100 (不计算 loss)。
-    与 _expand_video_placeholders 完全对齐。
+    Insert -100 (no loss) at every camera-token position (K=tokens_per_frame per frame).
+    Fully aligned with _expand_video_placeholders.
     """
     B, seq_len = labels.shape
     K = int(tokens_per_frame)
@@ -120,21 +121,21 @@ def _expand_labels_for_camera(
         vid_start = vid_positions[0].item()
         vid_end = vid_positions[-1].item() + 1
 
-        # 复制 video 之前
+        # Copy the tokens before the video.
         new_labels[b, :vid_start] = labels[b, :vid_start]
 
-        # 逐帧插入 K 个 -100 (camera) + 原始 visual labels
+        # Insert K camera placeholders (-100) + the original visual labels, frame by frame.
         src_offset = vid_start
         dst_offset = vid_start
         for n_tokens in frame_token_counts:
-            # Camera token 位置 (K 个): -100 (已由 full 初始化)
+            # Camera token positions (K of them): already -100 from the `full` init.
             dst_offset += K
-            # 原始 visual token labels
+            # Original visual token labels.
             new_labels[b, dst_offset:dst_offset + n_tokens] = labels[b, src_offset:src_offset + n_tokens]
             dst_offset += n_tokens
             src_offset += n_tokens
 
-        # 复制 video 之后
+        # Copy the tokens after the video.
         remaining = seq_len - vid_end
         if remaining > 0:
             new_labels[b, dst_offset:dst_offset + remaining] = labels[b, vid_end:]
@@ -146,24 +147,25 @@ class CamDistillQwen3VLLoader(Qwen3VLLoader):
     """
     CamDistill Loader for Qwen3-VL.
 
-    使用修改版 modeling 文件加载模型, 在 forward 中直接注入 camera tokens。
-    模型内部通过 _camdistill_enabled 标志控制是否注入。
-    ViT 中间层通过 forward hooks 收集, 供 CameraTokenModule 使用。
+    Loads the model with the modified modeling file, injecting camera tokens directly
+    inside forward. Injection is controlled by the model's _camdistill_enabled flag.
+    ViT intermediate layers are collected via forward hooks and consumed by the
+    CameraTokenModule.
     """
 
     def get_model(self, model_dir, config, processor, model_kwargs):
         model = super().get_model(model_dir, config, processor, model_kwargs)
 
-        # 读取配置
+        # Read config.
         vit_hidden_dim = config.vision_config.hidden_size    # 1024 or 1152
         vit_num_heads = config.vision_config.num_heads       # 16
         vit_depth = config.vision_config.depth               # 24 or 27
         llm_hidden_dim = config.vision_config.out_hidden_size  # 2560 or 4096
 
-        # CamDistill 配置
+        # CamDistill config.
         camdistill_depth = int(os.environ.get("CAMDISTILL_DEPTH", "6"))
 
-        # 计算 hook 层: 默认均匀取层，也支持显式指定 CAMDISTILL_EXTRACT_LAYERS
+        # Compute hook layers: evenly spaced by default; overridable via CAMDISTILL_EXTRACT_LAYERS.
         extract_layers = _resolve_camdistill_extract_layers(vit_depth, camdistill_depth)
 
         print(f"[CamDistill] Initializing CameraTokenModule:")
@@ -171,9 +173,10 @@ class CamDistillQwen3VLLoader(Qwen3VLLoader):
         print(f"  llm_hidden_dim={llm_hidden_dim}")
         print(f"  camdistill_depth={camdistill_depth}, extract_layers={extract_layers}")
 
-        # 创建 CameraTokenModule
-        # cam_dim 固定 1024: camera_features=2*cam_dim=2048, 与 VGGT 缓存对齐(VGGT stream=1024)。
-        # 必须显式指定, 否则默认取 ViT hidden(4B=1024 恰好=2048; 8B=1152→2304 与 VGGT 不匹配报错)。
+        # Instantiate CameraTokenModule.
+        # cam_dim is pinned to 1024: camera_features = 2 * cam_dim = 2048, matching the VGGT cache
+        # (VGGT stream = 1024). Must be explicit; otherwise the default ViT hidden dim (4B=1024
+        # happens to give 2048; 8B=1152 -> 2304 would mismatch VGGT and raise).
         camdistill = CameraTokenModule(
             hidden_dim=vit_hidden_dim,
             num_heads=vit_num_heads,
@@ -181,10 +184,10 @@ class CamDistillQwen3VLLoader(Qwen3VLLoader):
             llm_hidden_dim=llm_hidden_dim,
             cam_dim=int(os.environ.get("CAMDISTILL_CAM_DIM", "1024")),
         )
-        # CamDistill (learn) 强制 K=1, 因为 CameraTokenModule 一帧只输出 1 个 token
+        # CamDistill (learn mode) fixes K=1 since CameraTokenModule emits one token per frame.
         camdistill.tokens_per_frame = 1
 
-        # 设置模型属性 (供修改版 forward 使用)
+        # Attach model attributes consumed by the modified forward.
         inner_model = model.model  # Qwen3VLModel
         inner_model._camdistill_module = camdistill
         inner_model._camdistill_enabled = True
@@ -192,13 +195,15 @@ class CamDistillQwen3VLLoader(Qwen3VLLoader):
         inner_model._camdistill_preexpanded_input = True
         inner_model._camdistill_video_ids = []
 
-        # 也在顶层设置引用 (供 loss 使用)
+        # Also keep a top-level reference (used by the loss).
         model.camdistill = camdistill
 
-        # 从 checkpoint 显式恢复 CamDistill 模块参数，避免被主加载阶段当作 UNEXPECTED 丢弃。
+        # Explicitly restore CamDistill module parameters from checkpoint so that they are not
+        # dropped as UNEXPECTED during the main load stage.
         _try_load_camdistill_module_from_checkpoint(model_dir, camdistill)
 
-        # 在 ViT 上设置要缓存的中间层索引 (不用 hooks, 直接在 ViT forward 中缓存)
+        # Configure the ViT to cache the required intermediate layer indices (no hooks; caching
+        # happens directly inside the ViT forward).
         visual_module = inner_model.visual
         visual_module._camdistill_extract_layers = set(extract_layers)
         visual_module._camdistill_layer_cache = []
@@ -207,7 +212,7 @@ class CamDistillQwen3VLLoader(Qwen3VLLoader):
         print(f"[CamDistill] CameraTokenModule parameters: "
               f"{sum(p.numel() for p in camdistill.parameters()) / 1e6:.1f}M")
 
-        # 替换内层模型的 forward 为修改版 (含 camera token 注入逻辑)
+        # Swap the inner model's forward for the modified version (with camera-token injection).
         from modeling_qwen3_vl_camdistill import (
             Qwen3VLModel as Qwen3VLModelCamDistill,
             Qwen3VLVisionModel as Qwen3VLVisionModelCamDistill,
@@ -218,7 +223,7 @@ class CamDistillQwen3VLLoader(Qwen3VLLoader):
         inner_model.visual.forward = types.MethodType(
             Qwen3VLVisionModelCamDistill.forward, inner_model.visual
         )
-        # 同时替换 get_vision_position_ids 和 get_rope_index
+        # Also swap get_vision_position_ids and get_rope_index.
         inner_model.get_vision_position_ids = types.MethodType(
             Qwen3VLModelCamDistill.get_vision_position_ids, inner_model
         )
@@ -232,10 +237,10 @@ class CamDistillQwen3VLLoader(Qwen3VLLoader):
 
 
 # ============================================================
-# 3. 注册模型到 ms-swift
+# 3. Register models with ms-swift
 # ============================================================
 
-# Qwen3-VL 系列 (CamDistill 版)
+# Qwen3-VL family (CamDistill variant).
 register_model(
     ModelMeta(
         "qwen3_vl_camdistill",
@@ -251,12 +256,12 @@ register_model(
     ),
 )
 
-# Qwen3.5 系列 (CamDistill 版)
+# Qwen3.5 family (CamDistill variant).
 try:
     from swift.model.models.qwen import Qwen3_5Loader
 
     class CamDistillQwen35Loader(Qwen3_5Loader):
-        """Qwen3.5 版本的 CamDistill Loader"""
+        """Qwen3.5 CamDistill Loader."""
 
         def get_model(self, model_dir, config, processor, model_kwargs):
             model = super().get_model(model_dir, config, processor, model_kwargs)
@@ -272,7 +277,8 @@ try:
             print(f"[CamDistill-Qwen3.5] Initializing:")
             print(f"  vit_hidden_dim={vit_hidden_dim}, llm_hidden_dim={llm_hidden_dim}")
 
-            # cam_dim 固定 1024 -> camera_features=2048 对齐 VGGT (同上, 避免 ViT hidden≠1024 时维度不匹配)
+            # cam_dim pinned to 1024 -> camera_features=2048 aligned with VGGT
+            # (avoids dimension mismatch when ViT hidden != 1024).
             camdistill = CameraTokenModule(
                 hidden_dim=vit_hidden_dim,
                 num_heads=vit_num_heads,
@@ -280,9 +286,9 @@ try:
                 llm_hidden_dim=llm_hidden_dim,
                 cam_dim=int(os.environ.get("CAMDISTILL_CAM_DIM", "1024")),
             )
-            camdistill.tokens_per_frame = 1  # CamDistill 强制 K=1
+            camdistill.tokens_per_frame = 1  # CamDistill fixes K=1
 
-            # Qwen3.5 的内部结构: model.model = Qwen3_5Model
+            # Qwen3.5 internal structure: model.model = Qwen3_5Model.
             inner_model = model.model
             inner_model._camdistill_module = camdistill
             inner_model._camdistill_enabled = True
@@ -291,10 +297,11 @@ try:
             inner_model._camdistill_video_ids = []
             model.camdistill = camdistill
 
-            # 从 checkpoint 显式恢复 CamDistill 模块参数，避免被主加载阶段当作 UNEXPECTED 丢弃。
+            # Explicitly restore CamDistill module parameters from checkpoint so that they are
+            # not dropped as UNEXPECTED during the main load stage.
             _try_load_camdistill_module_from_checkpoint(model_dir, camdistill)
 
-            # 在 ViT 上设置缓存层
+            # Configure ViT cache layers.
             visual_module = inner_model.visual
             visual_module._camdistill_extract_layers = set(extract_layers)
             visual_module._camdistill_layer_cache = []
@@ -302,7 +309,7 @@ try:
             print(f"[CamDistill-Qwen3.5] Parameters: "
                   f"{sum(p.numel() for p in camdistill.parameters()) / 1e6:.1f}M")
 
-            # 替换 forward 为修改版
+            # Swap forward for the modified version.
             from modeling_qwen3_vl_camdistill import (
                 Qwen3VLModel as Qwen3VLModelCamDistill,
                 Qwen3VLVisionModel as Qwen3VLVisionModelCamDistill,
@@ -342,16 +349,18 @@ except ImportError:
 
 
 # ============================================================
-# 4. CamInject Baseline (完整注入实现)
+# 4. CamInject Baseline (full injection implementation)
 # ============================================================
 from caminject_model import CamInjectAdapter
 
 
 def _try_load_camdistill_module_from_checkpoint(model_dir: str, camdistill_module: nn.Module) -> None:
-    """从 checkpoint 手动恢复 CamDistill 模块参数。
+    """Manually restore the CamDistill module parameters from a checkpoint.
 
-    背景: 插件模块在 base model 加载后才挂接，checkpoint 中 `camdistill.*` / `model._camdistill_module.*`
-    常被主加载流程标记为 UNEXPECTED。这里主动恢复，确保推理评测使用训练好的 CamDistill 权重。
+    Context: plugin modules are attached after the base model has been loaded, so
+    `camdistill.*` / `model._camdistill_module.*` in the checkpoint are often flagged as
+    UNEXPECTED by the main load flow. Restoring them here ensures inference/evaluation
+    uses the trained CamDistill weights.
     """
     if camdistill_module is None:
         return
@@ -437,11 +446,12 @@ def _try_load_camdistill_module_from_checkpoint(model_dir: str, camdistill_modul
 
 
 def _try_load_caminject_projector_from_checkpoint(model_dir: str, adapter: nn.Module) -> None:
-    """从 checkpoint 手动恢复 CamInject projector 参数。
+    """Manually restore CamInject projector parameters from a checkpoint.
 
-    背景: ms-swift 先加载基础模型再由插件挂接 adapter，导致 checkpoint 里的
-    `model._camdistill_module.projector.*` / `caminject_adapter.projector.*`
-    在主加载阶段可能被报告为 UNEXPECTED。这里做一次显式恢复，避免 projector 随机初始化。
+    Context: ms-swift loads the base model before the plugin attaches the adapter, so keys
+    like `model._camdistill_module.projector.*` / `caminject_adapter.projector.*` in the
+    checkpoint may be reported as UNEXPECTED during the main load stage. Restoring them
+    explicitly here avoids the projector being randomly initialized.
     """
     projector = getattr(adapter, 'projector', None)
     if projector is None:
@@ -529,15 +539,16 @@ def _try_load_caminject_projector_from_checkpoint(model_dir: str, adapter: nn.Mo
 
 def _make_caminject_loader(base_loader_cls, model_file_module_name: str):
     """
-    工厂函数: 为指定的 base loader 创建 CamInject 版本的 Loader。
+    Factory: build a CamInject variant of the given base loader.
 
-    CamInject 与 CamDistill 共享完全相同的注入逻辑 (modified forward),
-    唯一区别是 camera_embeds 来源:
+    CamInject and CamDistill share exactly the same injection logic (modified forward);
+    the only difference is the source of camera_embeds:
       - CamDistill: CameraTokenModule(vit_intermediates) -> camera_embeds
       - CamInject:  VGGT_cache -> VGGTProjector -> camera_embeds
 
-    通过设置 _camdistill_mode='direct', modified forward 会跳过 vit_intermediates 检查,
-    直接调用 CamInjectAdapter (它忽略 vit_intermediates, 从 cache 加载)。
+    Setting _camdistill_mode='direct' tells the modified forward to skip the
+    vit_intermediates check and call CamInjectAdapter directly (which ignores
+    vit_intermediates and loads from cache).
     """
 
     class CamInjectLoader(base_loader_cls):
@@ -551,7 +562,7 @@ def _make_caminject_loader(base_loader_cls, model_file_module_name: str):
             if not vggt_cache_dir:
                 print("[CamInject] WARNING: VGGT_CACHE_DIR not set! Camera tokens will be zeros.")
 
-            # 创建 CamInjectAdapter (与 CameraTokenModule 相同接口)
+            # Instantiate CamInjectAdapter (same interface as CameraTokenModule).
             adapter = CamInjectAdapter(
                 llm_dim=llm_hidden_dim,
                 vggt_dim=2048,
@@ -559,28 +570,29 @@ def _make_caminject_loader(base_loader_cls, model_file_module_name: str):
             )
             adapter.set_cache_dir(vggt_cache_dir)
 
-            # 设置到 inner model 上 (与 CamDistill 相同的属性名)
+            # Attach to the inner model (same attribute names as CamDistill).
             inner_model = model.model
             inner_model._camdistill_module = adapter
             inner_model._camdistill_enabled = True
-            inner_model._camdistill_mode = 'direct'  # 关键: 告诉 forward 不需要 vit_intermediates
+            inner_model._camdistill_mode = 'direct'  # key: tells forward it does not need vit_intermediates
             inner_model._camdistill_preexpanded_input = True
 
-            # 也在顶层设置引用
+            # Also keep a top-level reference.
             model.caminject_adapter = adapter
 
-            # 显式恢复 projector 权重，避免 checkpoint 中插件参数在主加载阶段被当作 UNEXPECTED 后丢失。
+            # Explicitly restore projector weights so plugin parameters in the checkpoint are not
+            # lost after being flagged as UNEXPECTED during the main load stage.
             _try_load_caminject_projector_from_checkpoint(model_dir, adapter)
 
-            # 不需要设置 ViT 中间层缓存 (CamInject 不用)
-            # inner_model.visual._camdistill_extract_layers 不设置
+            # No ViT intermediate cache is needed (CamInject does not use it).
+            # inner_model.visual._camdistill_extract_layers is intentionally left unset.
 
             print(f"[CamInject] CamInjectAdapter initialized:")
             print(f"  llm_dim={llm_hidden_dim}, temporal_patch_size={temporal_patch_size}")
             print(f"  cache_dir={vggt_cache_dir}")
             print(f"  projector params: {sum(p.numel() for p in adapter.projector.parameters()) / 1e6:.1f}M")
 
-            # Monkey-patch forward (使用修改版的 forward 进行 camera token 注入)
+            # Monkey-patch forward (use the modified forward that performs camera-token injection).
             from modeling_qwen3_vl_camdistill import (
                 Qwen3VLModel as Qwen3VLModelCamDistill,
             )
@@ -643,16 +655,16 @@ except NameError:
 
 
 # ============================================================
-# 5. Video ID 注入机制 (Template monkey-patch)
+# 5. Video ID propagation (Template monkey-patch)
 # ============================================================
-# 目标: 让 CamInject 在 model.forward 中稳定拿到 video_ids。
-# 实现:
-#   1. patch Template.encode: 在样本级 features 增加 `video_ids`
-#   2. patch Template._data_collator_mm_data: 将 batch 内的 `video_ids` 显式透传到模型
+# Goal: let CamInject reliably access video_ids inside model.forward.
+# Implementation:
+#   1. patch Template.encode: attach `video_ids` to sample-level features.
+#   2. patch Template._data_collator_mm_data: forward `video_ids` from the batch to the model.
 #
-# 说明:
-#   - 仅 patch encode 不够，默认 collator 会丢弃未知字符串字段。
-#   - 双 patch 后，video_ids 会和 video_grid_thw 一起进入 forward kwargs。
+# Notes:
+#   - Patching encode alone is not enough; the default collator drops unknown string fields.
+#   - With both patches, video_ids travels alongside video_grid_thw into forward kwargs.
 
 _VIDEO_ID_PATCH_APPLIED = False
 _CAMINJECT_MODEL_TYPES = {'qwen3_vl_caminject', 'qwen3_5_caminject'}
@@ -689,9 +701,11 @@ def _expand_single_sample_for_camera(
     insert_position: str,
     tokens_per_frame: int = 1,
 ) -> None:
-    """在 encode 阶段扩展 sample 序列: 每帧前插或后插 K=tokens_per_frame 个 camera placeholder。
+    """Expand a sample's sequence during encode: insert K=tokens_per_frame camera placeholders
+    in front of / behind each frame.
 
-    注意: 推理阶段通常没有 labels，因此不能把 labels 作为扩展前置条件。
+    Note: inference typically has no labels, so labels cannot be used as a precondition for
+    expansion.
     """
     if not isinstance(sample, dict):
         return
@@ -869,7 +883,7 @@ def _video_path_to_id(video_path: str):
 
 
 def _extract_video_paths_from_messages(messages) -> List[str]:
-    """兼容 OpenAI message content 格式里的视频字段。"""
+    """Handle video fields found in OpenAI-style message content."""
     video_paths: List[str] = []
     if not isinstance(messages, list):
         return video_paths
@@ -901,7 +915,8 @@ def _extract_video_paths_from_messages(messages) -> List[str]:
 
 
 def _extract_video_paths_from_inputs(inputs) -> List[str]:
-    """从 dict / TemplateInputs / StdTemplateInputs 中提取视频路径（保持顺序，不跨字段去重）。"""
+    """Extract video paths from dict / TemplateInputs / StdTemplateInputs
+    (preserves order and does not deduplicate across fields)."""
     if isinstance(inputs, dict):
         chosen = inputs.get('chosen')
         if isinstance(chosen, dict):
@@ -937,7 +952,8 @@ def _extract_video_paths_from_inputs(inputs) -> List[str]:
 
 
 def _extract_video_ids_from_inputs(inputs) -> List[str]:
-    """从 dict / TemplateInputs / StdTemplateInputs 中提取原始视频路径并转成 video_id。"""
+    """Extract raw video paths from dict / TemplateInputs / StdTemplateInputs and convert them
+    into video_ids."""
     video_paths = _extract_video_paths_from_inputs(inputs)
 
     video_ids: List[str] = []
@@ -953,7 +969,8 @@ def _inject_video_ids_to_encoded(result, video_ids: List[str]) -> None:
     if not video_ids or result is None:
         return
 
-    # 单视频样本保持 str，兼容旧逻辑；多视频样本保存 list。
+    # Keep single-video samples as a str for backwards compatibility; multi-video samples become
+    # a list.
     payload = video_ids[0] if len(video_ids) == 1 else list(video_ids)
 
     if isinstance(result, dict):
@@ -981,10 +998,11 @@ def _inject_video_paths_to_encoded(result, video_paths: List[str]) -> None:
 
 
 def _collect_batch_video_ids(batch: List[dict]) -> List[str]:
-    """将 batch 里的 video_ids (str 或 list[str]) 展平成 list[str]。"""
+    """Flatten batch-level video_ids (str or list[str]) into a single list[str]."""
     batch_video_ids: List[str] = []
     for sample in batch:
-        # 只为真正参与视频分支的样本收集 video_ids，避免与 video_grid_thw 计数不一致。
+        # Only collect video_ids from samples that actually go through the video branch, so the
+        # count stays consistent with video_grid_thw.
         has_video_inputs = sample.get('video_grid_thw') is not None or sample.get('pixel_values_videos') is not None
         if not has_video_inputs:
             continue
@@ -1000,7 +1018,7 @@ def _collect_batch_video_ids(batch: List[dict]) -> List[str]:
 
 
 def _collect_batch_video_paths(batch: List[dict]) -> List[str]:
-    """将 batch 里的 video_paths (str 或 list[str]) 展平成 list[str]。"""
+    """Flatten batch-level video_paths (str or list[str]) into a single list[str]."""
     batch_video_paths: List[str] = []
     for sample in batch:
         has_video_inputs = sample.get('video_grid_thw') is not None or sample.get('pixel_values_videos') is not None
@@ -1019,8 +1037,8 @@ def _collect_batch_video_paths(batch: List[dict]) -> List[str]:
 
 def _maybe_expand_encoded_for_camera(template, encoded, *, video_ids: List[str]) -> None:
     """
-    在 encode 阶段完成 camera placeholder 扩展，保证 collator 看到的是最终序列。
-    仅对 qwen3_vl / qwen3_5 模板启用。
+    Perform camera-placeholder expansion during encode so the collator sees the final sequence.
+    Enabled only for qwen3_vl / qwen3_5 templates.
     """
     if not _is_qwen_vl_template_for_camera_patch(template):
         return
@@ -1036,7 +1054,7 @@ def _maybe_expand_encoded_for_camera(template, encoded, *, video_ids: List[str])
     image_processor = getattr(processor, 'image_processor', None)
     spatial_merge_size = int(getattr(image_processor, 'merge_size', 2) or 2)
     insert_position = os.environ.get('CAMERA_TOKEN_INSERT_POSITION', 'front').strip().lower()
-    # 每帧固定注入 1 个 camera token (VGGT 两帧平均成 1 个)
+    # Inject exactly one camera token per frame (two VGGT frames are averaged into one).
     tokens_per_frame = 1
     if video_token_id is None:
         return
@@ -1092,8 +1110,8 @@ def _validate_batch_video_meta(
     if num_videos <= 0:
         return
 
-    # CamDistill 和 CamInject cache 模式: 强依赖 video_id 查 cache。
-    # CamInject online 模式: 需要可用的视频路径。
+    # CamDistill and CamInject cache mode rely on video_id to look up the cache.
+    # CamInject online mode instead requires usable video paths.
     is_caminject_online = _is_caminject_model(template) and os.environ.get('VGGT_MODE', 'cache').strip().lower() == 'online'
 
     if is_caminject_online:
@@ -1130,8 +1148,8 @@ def _lookup_camera_module(template, model):
 def apply_video_id_patch():
     """
     Monkey-patch ms-swift Template:
-      - encode: 注入 sample-level `video_ids`
-      - _data_collator_mm_data: 将 `video_ids` 透传到 model.forward kwargs
+      - encode: inject sample-level `video_ids`.
+      - _data_collator_mm_data: forward `video_ids` to model.forward kwargs.
     """
     global _VIDEO_ID_PATCH_APPLIED
     if _VIDEO_ID_PATCH_APPLIED:
@@ -1147,14 +1165,15 @@ def apply_video_id_patch():
         _original_prepare_generate_kwargs = Template.prepare_generate_kwargs
 
         def _patched_encode(self, inputs, *args, **kwargs):
-            # 在 encode 前提取视频路径，避免后续 preprocess 把路径替换为 tensor/list。
+            # Extract video paths before encode; otherwise later preprocess may replace them with
+            # tensor/list.
             video_paths = _extract_video_paths_from_inputs(inputs)
             video_ids = _extract_video_ids_from_inputs(inputs)
             result = _original_encode(self, inputs, *args, **kwargs)
             _inject_video_ids_to_encoded(result, video_ids)
             _inject_video_paths_to_encoded(result, video_paths)
 
-            # Camera-token injection 模型: 在 encode 阶段完成 camera placeholder 扩展
+            # Camera-token injection models: perform camera placeholder expansion during encode.
             if _is_camera_injection_model(self):
                 _maybe_expand_encoded_for_camera(self, result, video_ids=video_ids)
             return result
@@ -1162,7 +1181,8 @@ def apply_video_id_patch():
         def _patched_mm_collator(self, batch: List[dict]):
             res = _original_mm_collator(self, batch)
 
-            # 先去掉可能由基类 collator 透传进来的原始字段，避免后续进入 model kwargs。
+            # First drop the raw fields possibly forwarded by the base collator so they never
+            # reach model kwargs.
             res.pop('video_ids', None)
             res.pop('video_paths', None)
 
@@ -1181,15 +1201,17 @@ def apply_video_id_patch():
         def _patched_prepare_generate_kwargs(self, generate_kwargs, *, model=None):
             generate_kwargs = _original_prepare_generate_kwargs(self, generate_kwargs, model=model)
 
-            # generate() 前统一移除辅助字段，避免 HF 校验 unused model_kwargs 报错。
+            # Uniformly remove helper fields before generate() so that HF's unused-model_kwargs
+            # check does not raise.
             batch_video_ids = _normalize_batch_video_ids(generate_kwargs.pop('video_ids', None))
             batch_video_paths = _normalize_batch_video_paths(generate_kwargs.pop('video_paths', None))
 
             if not _is_camera_injection_model(self):
                 return generate_kwargs
 
-            # 生成路径不会走 forward_context；在这里把 metadata 写入 adapter，
-            # 同时从 generate kwargs 移除，避免 HF generate 的 unused kwargs 报错。
+            # The generation path does not go through forward_context; write the metadata into
+            # the adapter here and remove it from generate kwargs to keep HF's unused-kwargs
+            # check happy.
             if not batch_video_ids and not batch_video_paths:
                 return generate_kwargs
 
@@ -1207,17 +1229,19 @@ def apply_video_id_patch():
 
         @contextmanager
         def _patched_forward_context(self, model, inputs):
-            # 将 collator 透传的 video_ids 放入 camera 模块，避免外层 model.forward wrapper。
+            # Move the video_ids forwarded by the collator into the camera module, avoiding the
+            # need for an outer model.forward wrapper.
             if not _is_camera_injection_model(self):
-                # 非 camera 注入模型也要清掉辅助字段，防止 forward/generate kwargs 校验报错。
+                # Non camera-injection models also need to drop the helper fields so
+                # forward/generate kwargs validation does not raise.
                 inputs.pop('video_ids', None)
                 inputs.pop('video_paths', None)
                 with _original_forward_context(self, model, inputs):
                     yield
                 return
 
-            # 必须从 inputs 中 pop 掉，避免 generate() 的 model_kwargs 校验报
-            # "unused model_kwargs: video_ids/video_paths"。
+            # Must pop from inputs to avoid generate()'s model_kwargs validation reporting
+            # "unused model_kwargs: video_ids/video_paths".
             batch_video_ids = _normalize_batch_video_ids(inputs.pop('video_ids', None))
             batch_video_paths = _normalize_batch_video_paths(inputs.pop('video_paths', None))
             adapter = _lookup_camera_module(self, model)
@@ -1252,12 +1276,12 @@ def apply_video_id_patch():
         print('  video_ids may be missing in forward; CamInject cache loading can degrade to zeros.')
 
 
-# 自动应用 patch (插件加载时)
+# Automatically apply the patch when the plugin is loaded.
 apply_video_id_patch()
 
 
 print("[CamDistill] Plugin loaded. Model types:")
-print("  - qwen3_vl_camdistill   (camera token 蒸馏)")
-print("  - qwen3_5_camdistill    (camera token 蒸馏)")
-print("  - qwen3_vl_caminject   (VGGT 直接注入)")
-print("  - qwen3_5_caminject    (VGGT 直接注入)")
+print("  - qwen3_vl_camdistill   (camera token distillation)")
+print("  - qwen3_5_camdistill    (camera token distillation)")
+print("  - qwen3_vl_caminject    (direct VGGT injection)")
+print("  - qwen3_5_caminject     (direct VGGT injection)")
