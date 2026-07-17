@@ -256,98 +256,6 @@ register_model(
     ),
 )
 
-# Qwen3.5 family (CamDistill variant).
-try:
-    from swift.model.models.qwen import Qwen3_5Loader
-
-    class CamDistillQwen35Loader(Qwen3_5Loader):
-        """Qwen3.5 CamDistill Loader."""
-
-        def get_model(self, model_dir, config, processor, model_kwargs):
-            model = super().get_model(model_dir, config, processor, model_kwargs)
-
-            vit_hidden_dim = config.vision_config.hidden_size
-            vit_num_heads = config.vision_config.num_heads
-            vit_depth = config.vision_config.depth
-            llm_hidden_dim = config.vision_config.out_hidden_size
-
-            camdistill_depth = int(os.environ.get("CAMDISTILL_DEPTH", "6"))
-            extract_layers = _resolve_camdistill_extract_layers(vit_depth, camdistill_depth)
-
-            print(f"[CamDistill-Qwen3.5] Initializing:")
-            print(f"  vit_hidden_dim={vit_hidden_dim}, llm_hidden_dim={llm_hidden_dim}")
-
-            # cam_dim pinned to 1024 -> camera_features=2048 aligned with VGGT
-            # (avoids dimension mismatch when ViT hidden != 1024).
-            camdistill = CameraTokenModule(
-                hidden_dim=vit_hidden_dim,
-                num_heads=vit_num_heads,
-                depth=camdistill_depth,
-                llm_hidden_dim=llm_hidden_dim,
-                cam_dim=int(os.environ.get("CAMDISTILL_CAM_DIM", "1024")),
-            )
-            camdistill.tokens_per_frame = 1  # CamDistill fixes K=1
-
-            # Qwen3.5 internal structure: model.model = Qwen3_5Model.
-            inner_model = model.model
-            inner_model._camdistill_module = camdistill
-            inner_model._camdistill_enabled = True
-            inner_model._camdistill_mode = 'learn'
-            inner_model._camdistill_preexpanded_input = True
-            inner_model._camdistill_video_ids = []
-            model.camdistill = camdistill
-
-            # Explicitly restore CamDistill module parameters from checkpoint so that they are
-            # not dropped as UNEXPECTED during the main load stage.
-            _try_load_camdistill_module_from_checkpoint(model_dir, camdistill)
-
-            # Configure ViT cache layers.
-            visual_module = inner_model.visual
-            visual_module._camdistill_extract_layers = set(extract_layers)
-            visual_module._camdistill_layer_cache = []
-
-            print(f"[CamDistill-Qwen3.5] Parameters: "
-                  f"{sum(p.numel() for p in camdistill.parameters()) / 1e6:.1f}M")
-
-            # Swap forward for the modified version.
-            from modeling_qwen3_vl_camdistill import (
-                Qwen3VLModel as Qwen3VLModelCamDistill,
-                Qwen3VLVisionModel as Qwen3VLVisionModelCamDistill,
-            )
-            inner_model.forward = types.MethodType(
-                Qwen3VLModelCamDistill.forward, inner_model
-            )
-            inner_model.visual.forward = types.MethodType(
-                Qwen3VLVisionModelCamDistill.forward, inner_model.visual
-            )
-            inner_model.get_vision_position_ids = types.MethodType(
-                Qwen3VLModelCamDistill.get_vision_position_ids, inner_model
-            )
-            inner_model.get_rope_index = types.MethodType(
-                Qwen3VLModelCamDistill.get_rope_index, inner_model
-            )
-            print(f"[CamDistill-Qwen3.5] Forward patched")
-            return model
-
-    register_model(
-        ModelMeta(
-            "qwen3_5_camdistill",
-            [
-                ModelGroup([
-                    Model("Qwen/Qwen3.5-4B", "Qwen/Qwen3.5-4B"),
-                    Model("Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-9B"),
-                ], TemplateType.qwen3_5),
-            ],
-            CamDistillQwen35Loader,
-            architectures=["Qwen3_5ForConditionalGeneration"],
-            is_multimodal=True,
-        ),
-    )
-    print("[CamDistill] Qwen3.5 CamDistill models registered.")
-except ImportError:
-    print("[CamDistill] WARNING: Qwen3_5Loader not found, Qwen3.5 CamDistill not available.")
-
-
 # ============================================================
 # 4. CamInject Baseline (full injection implementation)
 # ============================================================
@@ -631,28 +539,6 @@ register_model(
     ),
 )
 
-# Qwen3.5 CamInject
-try:
-    CamInjectQwen35Loader = _make_caminject_loader(Qwen3_5Loader, "modeling_qwen3_vl_camdistill")
-
-    register_model(
-        ModelMeta(
-            "qwen3_5_caminject",
-            [
-                ModelGroup([
-                    Model("Qwen/Qwen3.5-4B", "Qwen/Qwen3.5-4B"),
-                    Model("Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-9B"),
-                ], TemplateType.qwen3_5),
-            ],
-            CamInjectQwen35Loader,
-            architectures=["Qwen3_5ForConditionalGeneration"],
-            is_multimodal=True,
-        ),
-    )
-    print("[CamInject] Qwen3.5 CamInject models registered.")
-except NameError:
-    pass
-
 
 # ============================================================
 # 5. Video ID propagation (Template monkey-patch)
@@ -667,8 +553,8 @@ except NameError:
 #   - With both patches, video_ids travels alongside video_grid_thw into forward kwargs.
 
 _VIDEO_ID_PATCH_APPLIED = False
-_CAMINJECT_MODEL_TYPES = {'qwen3_vl_caminject', 'qwen3_5_caminject'}
-_CAMDISTILL_MODEL_TYPES = {'qwen3_vl_camdistill', 'qwen3_5_camdistill'}
+_CAMINJECT_MODEL_TYPES = {'qwen3_vl_caminject'}
+_CAMDISTILL_MODEL_TYPES = {'qwen3_vl_camdistill'}
 
 def _is_caminject_model(template) -> bool:
     model_type = getattr(getattr(template, 'model_meta', None), 'model_type', None)
@@ -1282,6 +1168,4 @@ apply_video_id_patch()
 
 print("[CamDistill] Plugin loaded. Model types:")
 print("  - qwen3_vl_camdistill   (camera token distillation)")
-print("  - qwen3_5_camdistill    (camera token distillation)")
 print("  - qwen3_vl_caminject    (direct VGGT injection)")
-print("  - qwen3_5_caminject     (direct VGGT injection)")

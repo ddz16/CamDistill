@@ -8,8 +8,6 @@ export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${L
 # Supported models:
 #   1. Qwen3-VL-4B-Instruct  (multimodal, ~4B params)
 #   2. Qwen3-VL-8B-Instruct  (multimodal, ~8B params)
-#   3. Qwen3.5-4B            (multimodal, ~4B params, Linear Attention)
-#   4. Qwen3.5-9B            (multimodal, ~9B params, Linear Attention)
 #
 # Usage:
 #   bash camera_movement_sft/train.sh <model_name>
@@ -17,12 +15,9 @@ export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${L
 #   model_name values:
 #     qwen3vl-4b   -> Qwen/Qwen3-VL-4B-Instruct
 #     qwen3vl-8b   -> Qwen/Qwen3-VL-8B-Instruct
-#     qwen35-4b    -> Qwen/Qwen3.5-4B
-#     qwen35-9b    -> Qwen/Qwen3.5-9B
 #
 # Examples:
 #   bash camera_movement_sft/train.sh qwen3vl-8b
-#   bash camera_movement_sft/train.sh qwen35-9b
 #   RESUME=true bash camera_movement_sft/train.sh qwen3vl-8b
 # ============================================================================
 
@@ -52,25 +47,9 @@ case "${MODEL_NAME}" in
         LEARNING_RATE=${LEARNING_RATE:-1.5e-5}
         DEEPSPEED_STAGE=${DEEPSPEED_STAGE:-zero2}
         ;;
-    qwen35-4b|qwen3.5-4b)
-        MODEL="Qwen/Qwen3.5-4B"
-        MODEL_SHORT="qwen35_4b"
-        PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
-        GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-4}
-        LEARNING_RATE=${LEARNING_RATE:-2e-5}
-        DEEPSPEED_STAGE=${DEEPSPEED_STAGE:-zero2}
-        ;;
-    qwen35-9b|qwen3.5-9b)
-        MODEL="Qwen/Qwen3.5-9B"
-        MODEL_SHORT="qwen35_9b"
-        PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
-        GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-4}
-        LEARNING_RATE=${LEARNING_RATE:-1.5e-5}
-        DEEPSPEED_STAGE=${DEEPSPEED_STAGE:-zero2}
-        ;;
     *)
         echo "Error: unknown model '${MODEL_NAME}'"
-        echo "Supported: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b"
+        echo "Supported: qwen3vl-4b, qwen3vl-8b"
         exit 1
         ;;
 esac

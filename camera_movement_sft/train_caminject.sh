@@ -28,7 +28,7 @@ export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${L
 #   VGGT_MODE=cache VGGT_CACHE_DIR=/path/to/cache \
 #   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
-# Supported models: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b
+# Supported models: qwen3vl-4b, qwen3vl-8b
 # ============================================================================
 
 set -e
@@ -59,27 +59,9 @@ case "${MODEL_NAME}" in
         LEARNING_RATE=${LEARNING_RATE:-1.5e-5}
         DEEPSPEED_STAGE=${DEEPSPEED_STAGE:-zero2}
         ;;
-    qwen35-4b|qwen3.5-4b)
-        MODEL="Qwen/Qwen3.5-4B"
-        MODEL_TYPE="qwen3_5_caminject"
-        MODEL_SHORT="qwen35_4b_caminject"
-        PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
-        GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-4}
-        LEARNING_RATE=${LEARNING_RATE:-2e-5}
-        DEEPSPEED_STAGE=${DEEPSPEED_STAGE:-zero2}
-        ;;
-    qwen35-9b|qwen3.5-9b)
-        MODEL="Qwen/Qwen3.5-9B"
-        MODEL_TYPE="qwen3_5_caminject"
-        MODEL_SHORT="qwen35_9b_caminject"
-        PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-2}
-        GRADIENT_ACCUMULATION=${GRADIENT_ACCUMULATION:-4}
-        LEARNING_RATE=${LEARNING_RATE:-1.5e-5}
-        DEEPSPEED_STAGE=${DEEPSPEED_STAGE:-zero2}
-        ;;
     *)
         echo "Error: unknown model '${MODEL_NAME}'"
-        echo "Supported: qwen3vl-4b, qwen3vl-8b, qwen35-4b, qwen35-9b"
+        echo "Supported: qwen3vl-4b, qwen3vl-8b"
         exit 1
         ;;
 esac

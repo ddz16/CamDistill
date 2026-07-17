@@ -8,7 +8,6 @@ export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # Defau
 #
 # Examples:
 #   bash camera_movement_sft/start_train.sh qwen3vl-8b
-#   bash camera_movement_sft/start_train.sh qwen35-9b
 #   bash camera_movement_sft/start_train.sh              # default: qwen3vl-8b
 # ============================================================================
 
