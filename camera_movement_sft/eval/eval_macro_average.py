@@ -364,9 +364,9 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
 # GT loading functions
 # ==========================================================================
 
-# Default GT file paths.
-DEFAULT_GT_V1 = "/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/test/500评测集_人工筛选后_with_split_clips.jsonl"
-DEFAULT_GT_V2 = "/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/test/500评测集_人工筛选后_with_split_clips.jsonl"
+# Default GT file path.
+DEFAULT_GT_V1 = "/group/40009/dazhaodu/OurBenchmark/youtube_benchmark_subset.jsonl"
+DEFAULT_GT_V2 = "/group/40009/dazhaodu/OurBenchmark/youtube_benchmark_subset.jsonl"
 
 
 def load_gt_from_external_file(gt_path: str) -> Dict[str, dict]:

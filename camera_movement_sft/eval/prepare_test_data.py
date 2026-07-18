@@ -38,7 +38,7 @@ sys.path.insert(0, PROJECT_DIR)
 from common import SYSTEM_PROMPT, USER_PROMPT
 
 # Test data paths.
-DEFAULT_TEST_DATA = "/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/test/500评测集_人工筛选后_with_split_clips.jsonl"
+DEFAULT_TEST_DATA = "/group/40009/dazhaodu/OurBenchmark/youtube_benchmark_subset.jsonl"
 DEFAULT_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "test_data_swift")
 
 
