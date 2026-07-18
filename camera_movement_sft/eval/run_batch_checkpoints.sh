@@ -189,7 +189,7 @@ fi
 # ================================
 if [ ${#RAW_TEST_DATA_LIST[@]} -eq 0 ]; then
     RAW_TEST_DATA_LIST=(
-        "/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/test/500评测集_人工筛选后_with_split_clips.jsonl"
+        "/group/40009/dazhaodu/OurBenchmark/youtube_benchmark_subset.jsonl"
     )
 fi
 
@@ -375,34 +375,12 @@ for RAW_TEST_DATA in "${RAW_TEST_DATA_LIST[@]}"; do
 
     SUMMARY_OUTPUT="${RUN_DIR}/eval_results.json"
 
-    # Detect split_clips test sets; if found, merge clip predictions back to the original video
-    # dimension before evaluating.
-    if echo "${TESTSET_BASENAME}" | grep -q "split_clips"; then
-        MERGE_EVAL_SCRIPT="${SCRIPT_DIR}/merge_split_clips_eval.py"
-        # Hard-coded GT file path for the split_clips test set.
-        SPLIT_CLIPS_GT="/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/test/500评测集-0519-gt结果-2026-05-21--标注结果459条--人工筛选后.jsonl"
-
-        echo "  [Merge+Eval] Detected split_clips test set, running merge before evaluation."
-        echo "  [Merge+Eval] Split-clips data: ${RAW_TEST_DATA}"
-        echo "  [Merge+Eval] GT file:          ${SPLIT_CLIPS_GT}"
-
-        python3 ${MERGE_EVAL_SCRIPT} \
-            --split_clips_file "${RAW_TEST_DATA}" \
-            --pred ${ALL_PRED_PATHS[@]} \
-            --gt "${SPLIT_CLIPS_GT}" \
-            --eval_script "${EVAL_SCRIPT}" \
-            --iou_thresh 0.3 0.5 0.7 \
-            --output "${SUMMARY_OUTPUT}" \
-            2>&1 | tee "${RUN_DIR}/eval_log.txt"
-    else
-        # Standard test set: evaluate directly.
-        python3 ${EVAL_SCRIPT} \
-            --gt "${RAW_TEST_DATA}" \
-            --pred ${ALL_PRED_PATHS[@]} \
-            --iou_thresh 0.3 0.5 0.7 \
-            --output "${SUMMARY_OUTPUT}" \
-            2>&1 | tee "${RUN_DIR}/eval_log.txt"
-    fi
+    python3 ${EVAL_SCRIPT} \
+        --gt "${RAW_TEST_DATA}" \
+        --pred ${ALL_PRED_PATHS[@]} \
+        --iou_thresh 0.3 0.5 0.7 \
+        --output "${SUMMARY_OUTPUT}" \
+        2>&1 | tee "${RUN_DIR}/eval_log.txt"
 
     echo ""
     echo "  ✓ ${TESTSET_NAME} evaluation complete"
