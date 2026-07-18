@@ -72,7 +72,6 @@ Then edit `camera_movement_sft/env.sh` and fill in your values:
 | `VGGT_CACHE_DIR` | Pre-extracted feature cache directory (CamDistill / CamInject) |
 | `DATASET_PATH` | Training dataset path (optional; defaults to the built-in 50k set) |
 
-`env.sh` is git-ignored and will never be committed.
 
 ---
 
@@ -242,10 +241,3 @@ bash camera_movement_sft/eval/run_batch_checkpoints.sh <testset.jsonl>
 ```
 
 Results are saved to `camera_movement_sft/eval/eval_results/<run_name>/eval_results.json`.
-
-### 6.2 Public Benchmarks
-
-Refer to the scripts under `camera_movement_sft/benchmarks/` for evaluation on:
-
-- **CameraBench**
-- **MultiCamVideo**
