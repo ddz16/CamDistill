@@ -131,8 +131,7 @@ MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-16}"
 # Optional CamInject evaluation configuration.
 # ================================
 USE_CAMINJECT="${USE_CAMINJECT:-0}"                     # 1: use the caminject plugin for inference
-VGGT_MODE="${VGGT_MODE:-cache}"                         # cache or online
-VGGT_CACHE_DIR="${VGGT_CACHE_DIR:-}"                    # required in cache mode
+VGGT_MODE="online"                                      # always online mode for inference
 VGGT_TEACHER_TYPE="${VGGT_TEACHER_TYPE:-vggt}"          # vggt or vggt_omega
 VGGT_MODEL_PATH="${VGGT_MODEL_PATH:-}"                  # used in online mode; auto-selected when empty
 if [ -z "${VGGT_MODEL_PATH}" ]; then
@@ -153,26 +152,11 @@ CAMINJECT_LOG_EVERY="${CAMINJECT_LOG_EVERY:-50}"
 CAMINJECT_PLUGIN_PATH="${CAMINJECT_PLUGIN_PATH:-camera_movement_sft/plugins/camdistill_plugin.py}"
 
 if [ "${USE_CAMINJECT}" = "1" ]; then
-    export VGGT_MODE VGGT_CACHE_DIR VGGT_TEACHER_TYPE VGGT_MODEL_PATH
+    export VGGT_MODE VGGT_TEACHER_TYPE VGGT_MODEL_PATH
     export VGGT_ONLINE_FPS VGGT_ONLINE_MAX_FRAMES
     export CAMINJECT_STRICT_IDS CAMINJECT_STRICT_CACHE
     export CAMINJECT_MAX_MISS_RATIO CAMINJECT_MIN_RATIO_SAMPLES CAMINJECT_LOG_EVERY
-
-    if [ "${VGGT_MODE}" = "cache" ]; then
-        if [ -z "${VGGT_CACHE_DIR}" ]; then
-            echo "[ERROR] VGGT_CACHE_DIR must be set when USE_CAMINJECT=1 and VGGT_MODE=cache"
-            exit 1
-        fi
-        if [ ! -d "${VGGT_CACHE_DIR}" ]; then
-            echo "[ERROR] VGGT_CACHE_DIR does not exist: ${VGGT_CACHE_DIR}"
-            exit 1
-        fi
-    elif [ "${VGGT_MODE}" = "online" ]; then
-        export VGGT_CACHE_DIR=""
-    else
-        echo "[ERROR] Unsupported VGGT_MODE=${VGGT_MODE} (only 'cache' or 'online' are supported)"
-        exit 1
-    fi
+    export VGGT_CACHE_DIR=""  # always online; cache dir unused
 
     if [ ! -f "${CAMINJECT_PLUGIN_PATH}" ]; then
         echo "[ERROR] CamInject plugin not found: ${CAMINJECT_PLUGIN_PATH}"
@@ -227,11 +211,10 @@ echo "Checkpoints:   ${CHECKPOINTS[*]}"
 echo "Infer backend: ${INFER_BACKEND}"
 echo "USE_CAMINJECT: ${USE_CAMINJECT}"
 if [ "${USE_CAMINJECT}" = "1" ]; then
-    echo "VGGT mode:     ${VGGT_MODE}"
+    echo "VGGT mode:     online (fixed)"
     echo "VGGT teacher:  ${VGGT_TEACHER_TYPE}"
     echo "VGGT model:    ${VGGT_MODEL_PATH}"
     echo "CamInject type:${CAMINJECT_MODEL_TYPE}"
-    echo "VGGT cache:    ${VGGT_CACHE_DIR:-<disabled>}"
     echo "VGGT online fps/max_frames: ${VGGT_ONLINE_FPS}/${VGGT_ONLINE_MAX_FRAMES}"
 fi
 echo "Test sets (${#RAW_TEST_DATA_LIST[@]}):"

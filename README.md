@@ -106,16 +106,9 @@ bash camera_movement_sft/eval/run_batch_checkpoints.sh \
     /path/to/OurBenchmark/youtube_benchmark_subset.jsonl
 ```
 
-**CamInject-4B** (requires VGGT features, cache or online mode):
+**CamInject-4B** (requires VGGT features, always runs online):
 ```bash
-# Cache mode
-USE_CAMINJECT=1 VGGT_MODE=cache VGGT_CACHE_DIR=/path/to/vggt_cache \
-BASE_MODEL=ddz16/CamInject-4B MODEL_TAG=caminject_4b \
-bash camera_movement_sft/eval/run_batch_checkpoints.sh \
-    /path/to/OurBenchmark/youtube_benchmark_subset.jsonl
-
-# Online mode (no pre-extraction needed)
-USE_CAMINJECT=1 VGGT_MODE=online VGGT_TEACHER_TYPE=vggt_omega \
+USE_CAMINJECT=1 VGGT_TEACHER_TYPE=vggt_omega \
 BASE_MODEL=ddz16/CamInject-4B MODEL_TAG=caminject_4b \
 bash camera_movement_sft/eval/run_batch_checkpoints.sh \
     /path/to/OurBenchmark/youtube_benchmark_subset.jsonl
@@ -148,10 +141,9 @@ swift infer \
     --val_dataset '[{"messages": [{"role": "user", "content": "<video>Describe the camera movement in this video."}], "videos": ["/path/to/your/video.mp4"]}]'
 ```
 
-**CamInject-4B** (requires the CamInject plugin):
+**CamInject-4B** (requires the CamInject plugin, always runs VGGT online):
 ```bash
-# Online mode — VGGT runs on-the-fly, no pre-extraction needed
-VGGT_MODE=online VGGT_TEACHER_TYPE=vggt_omega \
+VGGT_TEACHER_TYPE=vggt_omega \
 swift infer \
     --model ddz16/CamInject-4B \
     --model_type qwen3_vl_caminject \
@@ -318,12 +310,11 @@ BASE_MODEL=Qwen/Qwen3-VL-4B-Instruct MODEL_TAG=base_qwen3vl_4b \
 bash camera_movement_sft/eval/run_batch_checkpoints.sh <testset.jsonl>
 ```
 
-To evaluate a **CamInject checkpoint**:
+To evaluate a **CamInject checkpoint** (always online mode):
 
 ```bash
 USE_CAMINJECT=1 \
-VGGT_MODE=cache \
-VGGT_CACHE_DIR=/path/to/vggt_omega_cache \
+VGGT_TEACHER_TYPE=vggt_omega \
 TRAIN_OUTPUT_DIR=output/camera_sft_qwen3vl_4b_caminject/v0-<timestamp> \
 bash camera_movement_sft/eval/run_batch_checkpoints.sh <testset.jsonl>
 ```
