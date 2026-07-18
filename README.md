@@ -8,10 +8,11 @@ Camera movement understanding via knowledge distillation from VGGT.
 
 1. [Environment Setup](#1-environment-setup)
 2. [User Configuration](#2-user-configuration)
-3. [Prepare Training Data](#3-prepare-training-data)
-4. [Extract VGGT Features](#4-extract-vggt-features)  *(CamDistill / CamInject only)*
-5. [Training](#5-training)
-6. [Evaluation](#6-evaluation)
+3. [Quick Start with Pretrained Checkpoints](#3-quick-start-with-pretrained-checkpoints)
+4. [Prepare Training Data](#4-prepare-training-data)
+5. [Extract VGGT Features](#5-extract-vggt-features)  *(CamDistill / CamInject only)*
+6. [Training](#6-training)
+7. [Evaluation](#7-evaluation)
 
 ---
 
@@ -75,7 +76,94 @@ Then edit `camera_movement_sft/env.sh` and fill in your values:
 
 ---
 
-## 3. Prepare Training Data
+## 3. Quick Start with Pretrained Checkpoints
+
+We provide pretrained checkpoints on HuggingFace. You can directly download and run inference
+**without any training**.
+
+| Model | HF Repo | Description |
+|---|---|---|
+| CamSFT-4B | `ddz16/CamSFT-4B` | Standard SFT baseline |
+| CamDistill-4B | `ddz16/CamDistill-4B` | SFT + Camera Token Distillation |
+| CamInject-4B | `ddz16/CamInject-4B` | Frozen VGGT token injection |
+
+### 3.1 Evaluate on Our Benchmark
+
+Make sure the benchmark test set is placed at the path configured in your environment,
+then run:
+
+**CamSFT-4B:**
+```bash
+BASE_MODEL=ddz16/CamSFT-4B MODEL_TAG=camsft_4b \
+bash camera_movement_sft/eval/run_batch_checkpoints.sh \
+    /path/to/OurBenchmark/youtube_benchmark_subset.jsonl
+```
+
+**CamDistill-4B:**
+```bash
+BASE_MODEL=ddz16/CamDistill-4B MODEL_TAG=camdistill_4b \
+bash camera_movement_sft/eval/run_batch_checkpoints.sh \
+    /path/to/OurBenchmark/youtube_benchmark_subset.jsonl
+```
+
+**CamInject-4B** (requires VGGT features, cache or online mode):
+```bash
+# Cache mode
+USE_CAMINJECT=1 VGGT_MODE=cache VGGT_CACHE_DIR=/path/to/vggt_cache \
+BASE_MODEL=ddz16/CamInject-4B MODEL_TAG=caminject_4b \
+bash camera_movement_sft/eval/run_batch_checkpoints.sh \
+    /path/to/OurBenchmark/youtube_benchmark_subset.jsonl
+
+# Online mode (no pre-extraction needed)
+USE_CAMINJECT=1 VGGT_MODE=online VGGT_TEACHER_TYPE=vggt_omega \
+BASE_MODEL=ddz16/CamInject-4B MODEL_TAG=caminject_4b \
+bash camera_movement_sft/eval/run_batch_checkpoints.sh \
+    /path/to/OurBenchmark/youtube_benchmark_subset.jsonl
+```
+
+Results are saved to `camera_movement_sft/eval/eval_results/<run_name>/eval_results.json`.
+
+### 3.2 Inference on a Custom Video
+
+You can run camera movement analysis on any video with a custom prompt.
+
+**CamSFT-4B / CamDistill-4B** (standard models, no plugin needed):
+```bash
+swift infer \
+    --model ddz16/CamSFT-4B \
+    --use_hf true \
+    --infer_backend pt \
+    --stream true
+# Then enter your query interactively, e.g.:
+# <video>/path/to/your/video.mp4</video>
+# Describe the camera movement in this video.
+```
+
+Or pass a single query non-interactively:
+```bash
+swift infer \
+    --model ddz16/CamDistill-4B \
+    --use_hf true \
+    --infer_backend pt \
+    --val_dataset '[{"messages": [{"role": "user", "content": "<video>Describe the camera movement in this video."}], "videos": ["/path/to/your/video.mp4"]}]'
+```
+
+**CamInject-4B** (requires the CamInject plugin):
+```bash
+# Online mode — VGGT runs on-the-fly, no pre-extraction needed
+VGGT_MODE=online VGGT_TEACHER_TYPE=vggt_omega \
+swift infer \
+    --model ddz16/CamInject-4B \
+    --model_type qwen3_vl_caminject \
+    --external_plugins camera_movement_sft/plugins/camdistill_plugin.py \
+    --use_hf true \
+    --infer_backend pt \
+    --val_dataset '[{"messages": [{"role": "user", "content": "<video>Describe the camera movement in this video."}], "videos": ["/path/to/your/video.mp4"]}]'
+```
+
+---
+
+## 4. Prepare Training Data
 
 Place the training JSONL file at:
 
@@ -93,7 +181,7 @@ Place the benchmark test set at:
 
 ---
 
-## 4. Extract VGGT Features
+## 5. Extract VGGT Features
 
 > **Required for CamDistill and CamInject (cache mode) only. Skip for plain SFT.**
 
@@ -136,7 +224,7 @@ After extraction, set `VGGT_CACHE_DIR` in `env.sh` to the `--output_dir` path.
 
 ---
 
-## 5. Training
+## 6. Training
 
 All training scripts are under `camera_movement_sft/`. Activate the conda environment first:
 
@@ -144,7 +232,7 @@ All training scripts are under `camera_movement_sft/`. Activate the conda enviro
 conda activate cm
 ```
 
-### 5.1 CamSFT — Standard Supervised Fine-Tuning
+### 6.1 CamSFT — Standard Supervised Fine-Tuning
 
 ```bash
 bash camera_movement_sft/train.sh qwen3vl-4b
@@ -152,7 +240,7 @@ bash camera_movement_sft/train.sh qwen3vl-4b
 bash camera_movement_sft/train.sh qwen3vl-8b
 ```
 
-### 5.2 CamDistill — SFT + Camera Token Distillation
+### 6.2 CamDistill — SFT + Camera Token Distillation
 
 Requires pre-extracted VGGT features (`VGGT_CACHE_DIR` must be set).
 
@@ -172,7 +260,7 @@ Key environment variables:
 | `CAMDISTILL_WARMUP_STEPS` | `200` | Steps before distillation loss is enabled |
 | `CAMERA_TOKEN_INSERT_POSITION` | `front` | Insert camera token at `front` or `back` of each frame |
 
-### 5.3 CamInject — Inject Frozen VGGT Tokens into LLM
+### 6.3 CamInject — Inject Frozen VGGT Tokens into LLM
 
 **Cache mode** (recommended, requires pre-extracted features):
 
@@ -204,9 +292,9 @@ bash camera_movement_sft/train_caminject.sh qwen3vl-4b
 
 ---
 
-## 6. Evaluation
+## 7. Evaluation
 
-### 6.1 Our Benchmark
+### 7.1 Our Benchmark
 
 Evaluate a trained checkpoint on the internal benchmark:
 
