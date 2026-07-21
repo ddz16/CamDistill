@@ -84,6 +84,9 @@ def normalize_null(val):
 # Static, Unstable, Dolly In, Dolly Out, Zoom In, Zoom Out, Follow, Focus Shift, Free Fly
 DIRECTIONAL_TYPES = {'Pan', 'Tilt', 'Truck', 'Crane', 'Arc', 'Roll'}
 
+# Labels to exclude from all evaluation metrics.
+EXCLUDE_LABELS = {'Free Fly'}
+
 # ---- Label normalisation map ----
 # The model output may use type names that differ from the annotation spec;
 # map them to the canonical names used in the spec (GT format).
@@ -130,6 +133,8 @@ def get_basic_movement_types(seg: Optional[dict]) -> Set[str]:
         if t is None:
             continue
         norm_t, _ = normalize_movement(t, m.get('direction'))
+        if norm_t in EXCLUDE_LABELS:
+            continue
         types.add(norm_t)
     return types
 
@@ -153,6 +158,8 @@ def get_basic_movement_labels(seg: Optional[dict]) -> Set[str]:
             continue
         d = m.get('direction')
         norm_t, norm_d = normalize_movement(t, d)
+        if norm_t in EXCLUDE_LABELS:
+            continue
         if norm_t in DIRECTIONAL_TYPES and norm_d is not None:
             labels.add(f"{norm_t}_{norm_d}")
         else:

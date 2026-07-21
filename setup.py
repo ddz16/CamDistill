@@ -118,17 +118,7 @@ def parse_requirements(fname='requirements.txt', with_version=True):
 
 if __name__ == '__main__':
     install_requires, deps_link = parse_requirements('requirements.txt')
-    extra_requires = {}
-    all_requires = []
-    extra_requires['megatron'], _ = parse_requirements('requirements/megatron.txt')
-    extra_requires['eval'], _ = parse_requirements('requirements/eval.txt')
-    extra_requires['swanlab'], _ = parse_requirements('requirements/swanlab.txt')
-    extra_requires['ray'], _ = parse_requirements('requirements/ray.txt')
-    all_requires.extend(install_requires)
-    all_requires.extend(extra_requires['eval'])
-    all_requires.extend(extra_requires['swanlab'])
-    all_requires.extend(extra_requires['ray'])
-    extra_requires['all'] = all_requires
+    extra_requires = {'all': list(install_requires)}
 
     setup(
         name='ms_swift',
@@ -156,7 +146,6 @@ if __name__ == '__main__':
             'Programming Language :: Python :: 3.12',
         ],
         license='Apache License 2.0',
-        tests_require=parse_requirements('requirements/tests.txt'),
         install_requires=install_requires,
         extras_require=extra_requires,
         entry_points={
