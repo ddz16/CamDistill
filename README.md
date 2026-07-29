@@ -177,7 +177,28 @@ Place the benchmark test set at:
 
 > **Required for CamDistill and CamInject (cache mode) only. Skip for plain SFT.**
 
-Make sure `VGGT_REPO` / `VGGT_OMEGA_REPO` are set in `env.sh`.
+### 5.0 Clone the VGGT Repositories
+
+`vggt` and `vggt_omega` are not available on PyPI and must be cloned from GitHub.
+After cloning, set the corresponding paths in `env.sh`.
+
+**VGGT:**
+```bash
+git clone https://github.com/facebookresearch/vggt.git /path/to/vggt
+# Then in env.sh:
+# export VGGT_REPO="/path/to/vggt"
+```
+
+**VGGT-Omega:**
+```bash
+git clone https://github.com/facebookresearch/vggt-omega.git /path/to/vggt_omega
+# Then in env.sh:
+# export VGGT_OMEGA_REPO="/path/to/vggt_omega"
+```
+
+> **Note:** `VGGT_REPO` / `VGGT_OMEGA_REPO` are only needed when running feature
+> extraction or online inference (`VGGT_MODE=online`). They are **not** required for
+> standard training or cache-mode inference.
 
 **VGGT (default):**
 

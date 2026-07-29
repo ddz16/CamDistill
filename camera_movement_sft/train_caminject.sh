@@ -1,7 +1,5 @@
 #!/bin/bash
 export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # Default to decord (overridable via env), avoids torchcodec's CUDA (libnvrtc.so.13) version mismatch
-export LD_LIBRARY_PATH="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib:${LD_LIBRARY_PATH}"
-export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${LD_PRELOAD:+:$LD_PRELOAD}"
 # ============================================================================
 # CamInject Baseline training script.
 # ============================================================================
@@ -33,7 +31,12 @@ export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${L
 
 set -e
 
-# NOTE: activate the conda environment manually before running (conda activate cm).
+# ================================
+# Load user environment (proxy, tokens, paths)
+# ================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=env.sh
+source "${SCRIPT_DIR}/env.sh"
 
 # ================================
 # Model selection
@@ -111,7 +114,6 @@ fi
 # ================================
 # Path configuration
 # ================================
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 PLUGIN_PATH="${SCRIPT_DIR}/plugins/camdistill_plugin.py"
 
@@ -120,11 +122,6 @@ cd "${PROJECT_ROOT}"
 TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/camera_movement_train_diverse_50k_en.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-output/camera_sft_${MODEL_SHORT}}"
 
-# ================================
-# Load user environment (proxy, tokens, paths)
-# ================================
-# shellcheck source=env.sh
-source "${SCRIPT_DIR}/env.sh"
 
 # ================================
 # GPU configuration
@@ -228,8 +225,3 @@ echo "============================================"
 echo "CamInject training finished!"
 echo "Output dir: ${OUTPUT_DIR}"
 echo "============================================"
-
-# ===== After training, launch the GPU-occupation program on every node. =====
-echo "===== Training finished, launching GPU-occupation program ====="
-cd /group/40009/dazhaodu
-python run.py --size 25000 --gpus 0,1,2,3,4,5,6,7 --interval 0.002

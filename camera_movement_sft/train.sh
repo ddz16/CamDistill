@@ -1,7 +1,5 @@
 #!/bin/bash
 export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # Default to decord (overridable via env), avoids torchcodec's CUDA (libnvrtc.so.13) version mismatch
-export LD_LIBRARY_PATH="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib:${LD_LIBRARY_PATH}"
-export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${LD_PRELOAD:+:$LD_PRELOAD}"
 # ============================================================================
 # Camera-movement SFT training - unified entry script.
 # ============================================================================
@@ -23,7 +21,12 @@ export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${L
 
 set -e
 
-# NOTE: activate the conda environment manually before running (conda activate cm).
+# ================================
+# Load user environment (proxy, tokens, paths)
+# ================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=env.sh
+source "${SCRIPT_DIR}/env.sh"
 
 # ================================
 # Model selection
@@ -57,7 +60,6 @@ esac
 # ================================
 # Path configuration (overridable via env)
 # ================================
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 # Switch to the project root (ms-swift must be launched from the root).
@@ -77,11 +79,6 @@ else
     RESUME_CKPT=""
 fi
 
-# ================================
-# Load user environment (proxy, tokens, paths)
-# ================================
-# shellcheck source=env.sh
-source "${SCRIPT_DIR}/env.sh"
 
 # ================================
 # GPU configuration (overridable via env)
@@ -202,8 +199,3 @@ echo "Training finished!"
 echo "Output dir: ${OUTPUT_DIR}"
 echo "WandB: training logs synced to wandb.ai, project: camera-movement"
 echo "============================================"
-
-# ===== After training, launch the GPU-occupation program on every node. =====
-echo "===== Training finished, launching GPU-occupation program ====="
-cd /group/40009/dazhaodu
-python run.py --size 25000 --gpus 0,1,2,3,4,5,6,7 --interval 0.002

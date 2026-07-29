@@ -68,7 +68,7 @@ DEFAULT_DIRECTIONS = {
 # System Prompt (shared between training and inference; all scripts auto-sync on edit)
 # ============================================================
 
-SYSTEM_PROMPT_EN = """You are a senior film cinematographer.SYSTEM_PROMPT_EN = """You are a senior film cinematographer. After watching the video, determine which camera movements make up this video, locate their time spans, and output structured JSON.
+SYSTEM_PROMPT_EN = """You are a senior film cinematographer. After watching the video, determine which camera movements make up this video, locate their time spans, and output structured JSON.
 
 **Core principle: judge only the motion of the camera (lens) itself, not the motion of objects within the frame.** People walking or cars driving inside the frame does not mean the camera is moving — observe whether the **background and frame edges** are moving.
 
