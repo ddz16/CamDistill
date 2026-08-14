@@ -101,7 +101,7 @@ PLUGIN_PATH="${SCRIPT_DIR}/plugins/camdistill_plugin.py"
 cd "${PROJECT_ROOT}"
 
 # Training data.
-TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/camera_movement_train_diverse_50k_en.jsonl}"
+TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/train_swift.jsonl}"
 
 # Output directory.
 OUTPUT_DIR="${OUTPUT_DIR:-output/camera_sft_${MODEL_SHORT}}"

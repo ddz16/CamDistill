@@ -95,15 +95,22 @@ else
 fi
 
 
-export HF_HOME=/apdcephfs_gy2/share_303094921/hunyuan/yujiazhang/dazhaodu/hf
-export USE_HF="${USE_HF:-1}"  # Default: use HuggingFace hub (hits HF_HOME cache); set USE_HF=0 to fall back to ModelScope
-export HF_TOKEN=***REMOVED***
+# ================================
+# Load user environment (proxy, tokens, HF cache) from env.sh.
+# ================================
+# shellcheck source=../env.sh
+if [ -f "${SCRIPT_DIR}/../env.sh" ]; then
+    source "${SCRIPT_DIR}/../env.sh"
+fi
+export USE_HF="${USE_HF:-1}"  # Default: use HuggingFace hub; set USE_HF=0 to fall back to ModelScope
 
 # ================================
 # Dynamic library path configuration.
 # ================================
-export LD_LIBRARY_PATH="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib:${LD_LIBRARY_PATH}"
-export LD_PRELOAD="${CONDA_PREFIX:-/data/miniconda3/envs/cm}/lib/libjpeg.so.8${LD_PRELOAD:+:$LD_PRELOAD}"
+if [ -n "${CONDA_PREFIX}" ]; then
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
+    export LD_PRELOAD="${CONDA_PREFIX}/lib/libjpeg.so.8${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 
 # ================================
 # GPU configuration.
@@ -171,16 +178,40 @@ if [ "${USE_CAMINJECT}" = "1" ]; then
 fi
 
 # ================================
+# Optional CamDistill evaluation configuration.
+# CamDistill needs its plugin + model_type at inference time (the CameraTokenModule is
+# generated internally from ViT layers — no online VGGT required).
+# ================================
+USE_CAMDISTILL="${USE_CAMDISTILL:-0}"                   # 1: use the camdistill plugin for inference
+CAMDISTILL_MODEL_TYPE="${CAMDISTILL_MODEL_TYPE:-qwen3_vl_camdistill}"
+CAMDISTILL_PLUGIN_PATH="${CAMDISTILL_PLUGIN_PATH:-camera_movement_sft/plugins/camdistill_plugin.py}"
+
+if [ "${USE_CAMDISTILL}" = "1" ] && [ "${USE_CAMINJECT}" = "1" ]; then
+    echo "[ERROR] USE_CAMDISTILL and USE_CAMINJECT are mutually exclusive; set only one."
+    exit 1
+fi
+
+if [ "${USE_CAMDISTILL}" = "1" ]; then
+    if [ ! -f "${CAMDISTILL_PLUGIN_PATH}" ]; then
+        echo "[ERROR] CamDistill plugin not found: ${CAMDISTILL_PLUGIN_PATH}"
+        exit 1
+    fi
+    CAMINJECT_INFER_EXTRA_ARGS+=(--model_type "${CAMDISTILL_MODEL_TYPE}")
+    CAMINJECT_INFER_EXTRA_ARGS+=(--external_plugins "${CAMDISTILL_PLUGIN_PATH}")
+fi
+
+# ================================
 # Explicit model_type override (optional).
 # Some HF fine-tuned models have ambiguous model_type auto-detection in swift (e.g. the same
 # architecture is registered under multiple types such as qwen2_5_vl / mimo_vl); specify manually.
 #   Example: evaluate cam-motion-7b
 #   BASE_MODEL=chancharikm/qwen2.5-vl-7b-cam-motion MODEL_TAG=cam_motion_7b MODEL_TYPE=qwen2_5_vl bash ...
-# Note: when USE_CAMINJECT=1, model_type is already set by the CamInject branch; do not set MODEL_TYPE.
+# Note: when USE_CAMINJECT=1 or USE_CAMDISTILL=1, model_type is already set by that
+# branch; do not set MODEL_TYPE as well.
 # ================================
 MODEL_TYPE="${MODEL_TYPE:-}"
 MODEL_TYPE_ARGS=()
-if [ -n "${MODEL_TYPE}" ] && [ "${USE_CAMINJECT}" != "1" ]; then
+if [ -n "${MODEL_TYPE}" ] && [ "${USE_CAMINJECT}" != "1" ] && [ "${USE_CAMDISTILL}" != "1" ]; then
     MODEL_TYPE_ARGS+=(--model_type "${MODEL_TYPE}" --template "${MODEL_TYPE}")
 fi
 
@@ -189,16 +220,15 @@ fi
 # ================================
 if [ ${#RAW_TEST_DATA_LIST[@]} -eq 0 ]; then
     RAW_TEST_DATA_LIST=(
-        "/group/40009/dazhaodu/OurBenchmark/youtube_benchmark_subset.jsonl"
+        "${BENCHMARK_PATH:-${PROJECT_ROOT}/camera_movement_sft/data/CamChoreo/annotations.jsonl}"
     )
 fi
 
-# Local video candidate directories.
-VIDEO_DIRS=(
-    "/group/40059/yyjyu/data/aigc/camera_data/raw_videos_7w_readlfim+5w_anime_12w_overall/videos"
-    "/group/40059/yyjyu/code/cv/camera_captions_processing/data/train_data/camera_21k_video_shot_cameraMove/videos"
-    "/group/40059/yyjyu/code/cv/camera_captions_processing/data/train_data/camera_realfilm_30w_260401_deduped_final/videos"
-)
+# Optional fallback video directories, searched by <video_id>.mp4 when a sample's
+# local_path cannot be resolved. Usually not needed: CamChoreo's local_path
+# (./videos/<id>.mp4) resolves relative to the annotations.jsonl directory.
+# Override via env: VIDEO_DIRS="/dir1 /dir2" bash run_batch_checkpoints.sh ...
+read -r -a VIDEO_DIRS <<< "${VIDEO_DIRS:-}"
 
 EVAL_SCRIPT="${SCRIPT_DIR}/evaluate_camera_movement_fixed.py"
 
@@ -210,6 +240,7 @@ echo "Training tag:  ${TRAIN_TAG}"
 echo "Checkpoints:   ${CHECKPOINTS[*]}"
 echo "Infer backend: ${INFER_BACKEND}"
 echo "USE_CAMINJECT: ${USE_CAMINJECT}"
+echo "USE_CAMDISTILL:${USE_CAMDISTILL}"
 if [ "${USE_CAMINJECT}" = "1" ]; then
     echo "VGGT mode:     online (fixed)"
     echo "VGGT teacher:  ${VGGT_TEACHER_TYPE}"
@@ -269,12 +300,16 @@ for RAW_TEST_DATA in "${RAW_TEST_DATA_LIST[@]}"; do
     # ================================
     if [ ! -f "$TEST_DATA_SWIFT" ]; then
         echo "[Step 0] Test data not found, converting..."
+        # By default, resolve each sample's local_path relative to the JSONL dir.
+        # If VIDEO_DIRS is set, also search those dirs by <video_id>.mp4 and allow downloads.
+        CONVERT_EXTRA_ARGS=()
+        if [ ${#VIDEO_DIRS[@]} -gt 0 ]; then
+            CONVERT_EXTRA_ARGS=(--use_local_video --video_dir "${VIDEO_DIRS[@]}" --auto_download)
+        fi
         python ${SCRIPT_DIR}/prepare_test_data.py \
             --input "${RAW_TEST_DATA}" \
             --output_dir "${RUN_DIR}" \
-            --use_local_video \
-            --video_dir ${VIDEO_DIRS[@]} \
-            --auto_download
+            "${CONVERT_EXTRA_ARGS[@]}"
         if [ $? -ne 0 ]; then
             echo "[ERROR] Data conversion failed, skipping this test set!"
             continue

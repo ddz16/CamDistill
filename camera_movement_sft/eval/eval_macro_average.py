@@ -365,8 +365,13 @@ def macro_average_evaluation(gt_data, pred_data, sample_step=0.1):
 # ==========================================================================
 
 # Default GT file path.
-DEFAULT_GT_V1 = "/group/40009/dazhaodu/OurBenchmark/youtube_benchmark_subset.jsonl"
-DEFAULT_GT_V2 = "/group/40009/dazhaodu/OurBenchmark/youtube_benchmark_subset.jsonl"
+# BENCHMARK_PATH env var overrides; otherwise fall back to the in-repo default.
+_EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
+_CMS_DIR = os.path.dirname(_EVAL_DIR)
+DEFAULT_GT = os.environ.get(
+    "BENCHMARK_PATH",
+    os.path.join(_CMS_DIR, "data", "CamChoreo", "annotations.jsonl"),
+)
 
 
 def load_gt_from_external_file(gt_path: str) -> Dict[str, dict]:
@@ -464,14 +469,13 @@ def run_evaluation(gt_data: Dict[str, dict], gt_name: str, checkpoints: List[str
 
 def main():
     parser = argparse.ArgumentParser(description="Macro-average evaluation script")
-    parser.add_argument("--gt", type=str, default=DEFAULT_GT_V1,
-                        help="GT file path (default: 500-sample test set)")
+    parser.add_argument("--gt", type=str, default=DEFAULT_GT,
+                        help="GT file path (default: CamChoreo annotations.jsonl, "
+                             "overridable via BENCHMARK_PATH)")
     parser.add_argument("--gt2", type=str, default=None,
                         help="second GT file path (for comparison)")
-    parser.add_argument("--compare-default", action="store_true",
-                        help="compare the two default GT files (v1 and v2)")
     parser.add_argument("--base-dir", type=str,
-                        default="/group/40059/yyjyu/code/cv/swift-3.12.4/camera_movement_sft/eval/output_testset_300_balanced",
+                        default=os.path.join(_EVAL_DIR, "eval_results"),
                         help="checkpoint output directory")
     parser.add_argument("--checkpoints", type=str, nargs="+",
                         default=["checkpoint-2500", "checkpoint-3000", "checkpoint-3500",
@@ -484,12 +488,7 @@ def main():
 
     # Determine which GT files to evaluate.
     gt_files = []
-    if args.compare_default:
-        gt_files = [
-            (DEFAULT_GT_V1, "500-sample test set (v1)"),
-            (DEFAULT_GT_V2, "500-sample test set (v2)"),
-        ]
-    elif args.gt2:
+    if args.gt2:
         gt_files = [
             (args.gt, os.path.basename(args.gt)),
             (args.gt2, os.path.basename(args.gt2)),
@@ -510,7 +509,8 @@ def main():
         print("\n" + "=" * 120)
         print("  GT comparison summary (best checkpoint per GT)")
         print("=" * 120)
-        print(f"{'GT file':<45} | {'Best Ckpt':<18} | {'BM+Dir F1':>10} | {'BM Type F1':>11} | {'SM F1':>7} | {'Speed Acc':>10}")        print("-" * 120)
+        print(f"{'GT file':<45} | {'Best Ckpt':<18} | {'BM+Dir F1':>10} | {'BM Type F1':>11} | {'SM F1':>7} | {'Speed Acc':>10}")
+        print("-" * 120)
         for gt_name, data in all_gt_results.items():
             best_ckpt = data['best']
             res = data['results'][best_ckpt]['macro']

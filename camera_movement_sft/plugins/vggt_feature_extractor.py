@@ -20,7 +20,7 @@ Multi-GPU support:
 Usage:
     # VGGT (default), 8 GPUs in parallel
     python camera_movement_sft/plugins/vggt_feature_extractor.py \
-        --input_jsonl camera_movement_sft/train_data/camera_movement_train_human_all_167k.jsonl \
+        --input_jsonl camera_movement_sft/train_data/train_swift.jsonl \
         --output_dir /path/to/vggt_cache/ \
         --teacher vggt \
         --vggt_model facebook/VGGT-1B \
@@ -29,7 +29,7 @@ Usage:
 
     # VGGT-Omega, 8 GPUs in parallel
     python camera_movement_sft/plugins/vggt_feature_extractor.py \
-        --input_jsonl camera_movement_sft/train_data/camera_movement_train_human_all_167k.jsonl \
+        --input_jsonl camera_movement_sft/train_data/train_swift.jsonl \
         --output_dir /path/to/vggt_omega_cache/ \
         --teacher vggt_omega \
         --vggt_model facebook/VGGT-Omega \
@@ -390,26 +390,50 @@ def cmd_extract(args):
 
     # Read training data and collect every video_id together with its path.
     print(f"Reading {args.input_jsonl}...")
+    input_dir = os.path.dirname(os.path.abspath(args.input_jsonl))
     video_ids = set()
-    video_id_to_path = {}  # video_id -> absolute path from the jsonl (preferred)
+    video_id_to_path = {}  # video_id -> resolved path from the jsonl (preferred)
+
+    def _register(path_str):
+        """Derive video_id from a path and record its resolved location."""
+        if not isinstance(path_str, str) or not path_str:
+            return
+        vid = os.path.splitext(os.path.basename(path_str))[0]
+        video_ids.add(vid)
+        if vid in video_id_to_path:
+            return
+        # Resolve relative paths (e.g. CamChoreo's ./videos/<id>.mp4) against the jsonl dir.
+        if os.path.isabs(path_str):
+            resolved = path_str
+        elif "/" in path_str or "\\" in path_str:
+            resolved = os.path.normpath(os.path.join(input_dir, path_str))
+        else:
+            resolved = None  # bare id / filename: fall back to --video_dirs lookup
+        if resolved and os.path.exists(resolved):
+            video_id_to_path[vid] = resolved
+
     with open(args.input_jsonl, "r") as f:
         for line in f:
             if not line.strip():
                 continue
             data = json.loads(line)
-            # Extract video_id from the "videos" field.
-            videos = data.get("videos", [])
-            for v in videos:
-                if isinstance(v, str):
-                    vid = os.path.splitext(os.path.basename(v))[0]
-                    video_ids.add(vid)
-                    # Keep the original path from the jsonl (takes precedence over video_dirs lookup).
-                    if os.path.isabs(v) and vid not in video_id_to_path:
-                        video_id_to_path[vid] = v
+            # Support both the swift training format ("videos": [...]) and the
+            # CamChoreo annotation format ("local_path": "./videos/<id>.mp4").
+            for v in data.get("videos", []):
+                _register(v)
+            _register(data.get("local_path", ""))
+
+    # For any video_id still without a resolved path, search the fallback --video_dirs.
+    if args.video_dirs:
+        for vid in video_ids:
+            if vid not in video_id_to_path:
+                found = find_video_path(vid, args.video_dirs)
+                if found:
+                    video_id_to_path[vid] = found
 
     # Attach to args so gpu_worker can access it.
     args._video_id_to_path = video_id_to_path
-    print(f"  Found {len(video_id_to_path)} videos with absolute paths in jsonl")
+    print(f"  Resolved paths for {len(video_id_to_path)}/{len(video_ids)} videos")
 
     print(f"Total unique videos: {len(video_ids)}")
     if args.save_pose:
@@ -512,11 +536,10 @@ def main():
                         help="number of GPUs to use (default 8)")
     parser.add_argument("--save_pose", action="store_true", default=False,
                         help="also save the 9D pose decoded by the Camera Head")
-    parser.add_argument("--video_dirs", type=str, nargs="+", default=[
-        "/group/40059/yyjyu/data/aigc/camera_data/raw_videos_7w_readlfim+5w_anime_12w_overall/videos",
-        "/group/40059/yyjyu/code/cv/camera_captions_processing/data/train_data/camera_21k_video_shot_cameraMove/videos",
-        "/group/40059/yyjyu/code/cv/camera_captions_processing/data/train_data/camera_realfilm_30w_260401_deduped_final/videos",
-    ])
+    parser.add_argument("--video_dirs", type=str, nargs="+", default=[],
+                        help="optional fallback directories to search by <video_id>.mp4 "
+                             "when the jsonl path cannot be resolved (usually not needed: "
+                             "relative paths like ./videos/<id>.mp4 resolve against the jsonl dir)")
     parser.add_argument("--skip_existing", action="store_true", default=True,
                         help="skip caches that already exist (supports resume after interruption)")
     args = parser.parse_args()

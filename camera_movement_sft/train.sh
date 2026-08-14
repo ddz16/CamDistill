@@ -66,7 +66,7 @@ PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 cd "${PROJECT_ROOT}"
 
 # Training data path.
-TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/camera_movement_train_diverse_50k_en.jsonl}"
+TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/train_swift.jsonl}"
 
 # Resume toggle.
 RESUME="${RESUME:-false}"
@@ -140,11 +140,13 @@ echo "============================================"
 if [ ! -f "${TRAIN_DATA}" ]; then
     echo "Error: training data file not found: ${TRAIN_DATA}"
     echo ""
-    echo "Please prepare data first:"
-    echo "  python camera_movement_sft/prepare_human_labels.py"
+    echo "Prepare training data from CamChoreo-schema annotations first:"
+    echo "  python camera_movement_sft/prepare_train_data.py \\"
+    echo "      --input /path/to/your_annotations.jsonl \\"
+    echo "      --output camera_movement_sft/train_data/train_swift.jsonl"
     echo ""
-    echo "Or point to an existing dataset:"
-    echo "  DATASET_PATH=/path/to/data.jsonl bash camera_movement_sft/train.sh ${MODEL_NAME}"
+    echo "Then point DATASET_PATH at the produced file:"
+    echo "  DATASET_PATH=camera_movement_sft/train_data/train_swift.jsonl bash camera_movement_sft/train.sh ${MODEL_NAME}"
     exit 1
 fi
 

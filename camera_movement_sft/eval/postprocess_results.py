@@ -126,7 +126,9 @@ def postprocess(infer_result_path, mapping_path, output_dir, debug=False):
     mapping_by_source = {}
     for m in mappings:
         vid = m.get("video_id")
-        src = _normalize_video_source(m.get("cos_url"))
+        # prepare_test_data.py writes the resolved path as "video_source"
+        # (older mapping files used "cos_url"); accept either.
+        src = _normalize_video_source(m.get("video_source") or m.get("cos_url"))
         if isinstance(vid, str) and vid and src:
             mapping_by_source[src] = vid
 
@@ -201,7 +203,7 @@ def postprocess(infer_result_path, mapping_path, output_dir, debug=False):
     print(f"  Parse errors:        {stats['parse_error']}")
     print(
         "  video_id source: "
-        f"mapping[cos_url]={stats['vid_from_mapping_src']}  "
+        f"mapping[src]={stats['vid_from_mapping_src']}  "
         f"mapping[idx]={stats['vid_from_mapping_idx']}  "
         f"videos_field={stats['vid_from_videos']}  "
         f"unknown={stats['vid_unknown']}"

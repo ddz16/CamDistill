@@ -16,9 +16,9 @@ export FORCE_QWENVL_VIDEO_READER="${FORCE_QWENVL_VIDEO_READER:-decord}"  # Defau
 #   VGGT_MODE=cache VGGT_CACHE_DIR=/path/to/cache \
 #   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
-#   # Online extraction mode (no pre-extraction).
+#   # Online extraction mode (no pre-extraction; VGGT_MODEL_PATH auto-selects
+#   # facebook/VGGT-Omega for vggt_omega, facebook/VGGT-1B for vggt).
 #   VGGT_MODE=online VGGT_TEACHER_TYPE=vggt_omega \
-#   VGGT_MODEL_PATH=/group/40009/dazhaodu/vggt-omega/checkpoints/vggt_omega_1b_512.pt \
 #   bash camera_movement_sft/train_caminject.sh qwen3vl-8b
 #
 #   # Insert camera token at the end of each frame's visual tokens.
@@ -119,7 +119,7 @@ PLUGIN_PATH="${SCRIPT_DIR}/plugins/camdistill_plugin.py"
 
 cd "${PROJECT_ROOT}"
 
-TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/camera_movement_train_diverse_50k_en.jsonl}"
+TRAIN_DATA="${DATASET_PATH:-${SCRIPT_DIR}/train_data/train_swift.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-output/camera_sft_${MODEL_SHORT}}"
 
 

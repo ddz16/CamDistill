@@ -18,7 +18,7 @@ Both emit camera tokens with the same output dimension (**2048**); downstream tr
 
 ```bash
 python camera_movement_sft/plugins/vggt_feature_extractor.py \
-    --input_jsonl camera_movement_sft/train_data/camera_movement_train_diverse_50k.jsonl \
+    --input_jsonl camera_movement_sft/train_data/train_swift.jsonl \
     --output_dir /path/to/vggt_cache/ \
     --teacher vggt \
     --save_pose \
@@ -29,7 +29,7 @@ python camera_movement_sft/plugins/vggt_feature_extractor.py \
 
 ```bash
 python camera_movement_sft/plugins/vggt_feature_extractor.py \
-    --input_jsonl camera_movement_sft/train_data/camera_movement_train_diverse_50k.jsonl \
+    --input_jsonl camera_movement_sft/train_data/train_swift.jsonl \
     --output_dir /path/to/vggt_omega_cache/ \
     --teacher vggt_omega \
     --save_pose \
@@ -41,7 +41,7 @@ python camera_movement_sft/plugins/vggt_feature_extractor.py \
 
 | Argument | Default | Description |
 |---|---|---|
-| `--input_jsonl` | *(required)* | Training data JSONL; each line must have a `"videos"` field |
+| `--input_jsonl` | *(required)* | Training data JSONL; reads video paths from a `"videos"` field (ms-swift format) or a `"local_path"` field (CamChoreo annotation format) |
 | `--output_dir` | *(required)* | Directory where `.pt` cache files are saved |
 | `--teacher` | `vggt` | Teacher model: `vggt` or `vggt_omega` |
 | `--vggt_model` | auto | Model path or HF id; defaults to `facebook/VGGT-1B` / `facebook/VGGT-Omega` |
@@ -51,7 +51,7 @@ python camera_movement_sft/plugins/vggt_feature_extractor.py \
 | `--device` | `cuda:0` | Device used in single-GPU mode (`--num_gpus 1`) |
 | `--skip_existing` | `True` | Skip already-cached videos; supports resuming an interrupted run |
 | `--save_pose` | `False` | Also save the 9-D pose decoded by the Camera Head |
-| `--video_dirs` | *(see code)* | Local video search directories (fallback when jsonl paths are unavailable) |
+| `--video_dirs` | *(empty)* | Optional fallback directories, searched by `<video_id>.mp4` when a jsonl path cannot be resolved (usually not needed — relative paths resolve against the jsonl dir) |
 
 ---
 
