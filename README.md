@@ -2,6 +2,10 @@
 
 Camera movement understanding via knowledge distillation from VGGT.
 
+- **Paper**: [Temporally Grounded Compositional Camera Motion Understanding via Geometric Knowledge Distillation](https://huggingface.co/papers/2608.10932)
+- **Project page**: https://ddz16.github.io/cammotion.github.io
+- **Models & dataset**: [HuggingFace collection](https://huggingface.co/ddz16)
+
 ---
 
 ## Table of Contents
