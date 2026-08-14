@@ -387,3 +387,18 @@ bash camera_movement_sft/eval/run_batch_checkpoints.sh <testset.jsonl>
 ```
 
 Results are saved to `camera_movement_sft/eval/eval_results/<run_name>/eval_results.json`.
+
+---
+
+## Citation
+
+If you find this work useful, please consider citing:
+
+```bibtex
+@article{du2026camdistill,
+  title={Temporally Grounded Compositional Camera Motion Understanding via Geometric Knowledge Distillation},
+  author={Du, Dazhao and Du, Shiyan and Liu, Jian and Yu, Yongjian and Gu, Bohai and Han, Tao and Liu, Hualuo and Liu, Eric and Zhang, Yujia and Chen, Xi and Guo, Song},
+  journal={arXiv preprint arXiv:2608.10932},
+  year={2026}
+}
+```
