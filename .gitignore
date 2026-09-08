@@ -147,7 +147,8 @@ megatron_output/
 /*_cached_dataset/
 /sample_output/
 .qoder/
-camera_movement_sft/train_data/
+camera_movement_sft/train_data/*
+!camera_movement_sft/train_data/README.md
 
 # Pytorch
 *.pth
