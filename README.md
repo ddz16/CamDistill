@@ -148,7 +148,19 @@ bash camera_movement_sft/eval/run_batch_checkpoints.sh \
 **CamDistill-4B** (needs the CamDistill plugin; no online VGGT):
 ```bash
 USE_CAMDISTILL=1 \
+CAMDISTILL_DEPTH=4 \
+CAMDISTILL_EXTRACT_LAYERS=1,6,10,15 \
 BASE_MODEL=ddz16/CamDistill-4B MODEL_TAG=camdistill_4b \
+bash camera_movement_sft/eval/run_batch_checkpoints.sh \
+    /path/to/CamChoreo/annotations.jsonl
+```
+
+**CamDistill-8B** (needs the CamDistill plugin; no online VGGT):
+```bash
+USE_CAMDISTILL=1 \
+CAMDISTILL_DEPTH=8 \
+CAMDISTILL_EXTRACT_LAYERS=1,3,5,7,9,11,13,15 \
+BASE_MODEL=ddz16/CamDistill-8B MODEL_TAG=camdistill_8b \
 bash camera_movement_sft/eval/run_batch_checkpoints.sh \
     /path/to/CamChoreo/annotations.jsonl
 ```
