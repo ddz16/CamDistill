@@ -94,7 +94,10 @@ Then edit `camera_movement_sft/env.sh` and fill in your values:
 | `VGGT_OMEGA_REPO` | Local path to the VGGT-Omega repo (for feature extraction) |
 | `VGGT_CACHE_DIR` | Pre-extracted feature cache directory (CamDistill / CamInject) |
 | `DATASET_PATH` | Training dataset path (optional; overrides the default `train_data/train_swift.jsonl`) |
+| `CAMDISTILL_DEPTH` | Camera Token Module depth of the checkpoint you are using (see Section 3.0) |
+| `CAMDISTILL_EXTRACT_LAYERS` | ViT intermediate layer indices of that checkpoint (see Section 3.0) |
 
+> `run_batch_checkpoints.sh` sources `env.sh`, so setting the two CamDistill variables there covers benchmark evaluation. `infer_single.py` does **not** source `env.sh` — for single-video inference, put them on the command line (Section 3.3).
 
 ---
 
@@ -110,6 +113,27 @@ We provide pretrained checkpoints on HuggingFace. You can directly download and 
 | CamSFT-8B | [`ddz16/CamSFT-8B`](https://huggingface.co/ddz16/CamSFT-8B) | Standard SFT baseline |
 | CamDistill-8B | [`ddz16/CamDistill-8B`](https://huggingface.co/ddz16/CamDistill-8B) | Camera Token Distillation |
 | CamInject-8B | [`ddz16/CamInject-8B`](https://huggingface.co/ddz16/CamInject-8B) | Frozen VGGT token injection |
+
+### 3.0 Required: CamDistill layer configuration
+
+`infer_single.py` and `run_batch_checkpoints.sh` do **not** set the Camera Token
+Module geometry. The plugin falls back to `CAMDISTILL_DEPTH=6` plus auto-computed
+ViT extract layers, and loads the extra weights with `strict=False` — so a
+mismatched configuration runs **silently** with the wrong camera tokens (no error
+is raised). You must export these before any CamDistill inference or evaluation:
+
+| Checkpoint | `CAMDISTILL_DEPTH` | `CAMDISTILL_EXTRACT_LAYERS` |
+|---|---|---|
+| `ddz16/CamDistill-4B` | `4` | `1,5,9,13` |
+| `ddz16/CamDistill-8B` | `8` | `1,3,5,7,9,11,13,15` |
+
+These values determine how many `frame_layers` / `global_layers` the plugin builds
+and which intermediate ViT layers are cached during `forward()`; they must match
+the checkpoint's training configuration. The number of `frame_layers` groups in
+`model.safetensors.index.json` gives `CAMDISTILL_DEPTH` (4 groups for 4B, 8 groups
+for 8B). `CAMDISTILL_CAM_DIM` defaults to `1024`, which is correct for both
+checkpoints. `CAMDISTILL_LAMBDA` (`0.05`) only affects the training loss and is
+not needed at inference.
 
 ### 3.1 Download the Benchmark Dataset
 
@@ -147,19 +171,17 @@ bash camera_movement_sft/eval/run_batch_checkpoints.sh \
 
 **CamDistill-4B** (needs the CamDistill plugin; no online VGGT):
 ```bash
+CAMDISTILL_DEPTH=4 CAMDISTILL_EXTRACT_LAYERS=1,5,9,13 \
 USE_CAMDISTILL=1 \
-CAMDISTILL_DEPTH=4 \
-CAMDISTILL_EXTRACT_LAYERS=1,6,10,15 \
 BASE_MODEL=ddz16/CamDistill-4B MODEL_TAG=camdistill_4b \
 bash camera_movement_sft/eval/run_batch_checkpoints.sh \
     /path/to/CamChoreo/annotations.jsonl
 ```
 
-**CamDistill-8B** (needs the CamDistill plugin; no online VGGT):
+**CamDistill-8B**:
 ```bash
+CAMDISTILL_DEPTH=8 CAMDISTILL_EXTRACT_LAYERS=1,3,5,7,9,11,13,15 \
 USE_CAMDISTILL=1 \
-CAMDISTILL_DEPTH=8 \
-CAMDISTILL_EXTRACT_LAYERS=1,3,5,7,9,11,13,15 \
 BASE_MODEL=ddz16/CamDistill-8B MODEL_TAG=camdistill_8b \
 bash camera_movement_sft/eval/run_batch_checkpoints.sh \
     /path/to/CamChoreo/annotations.jsonl
@@ -192,8 +214,18 @@ python camera_movement_sft/infer_single.py \
 **CamDistill-4B** (needs the plugin; camera tokens are generated internally, **no
 online VGGT required**):
 ```bash
+CAMDISTILL_DEPTH=4 CAMDISTILL_EXTRACT_LAYERS=1,5,9,13 \
 python camera_movement_sft/infer_single.py \
     --model ddz16/CamDistill-4B \
+    --video /path/to/your/video.mp4 \
+    --variant camdistill
+```
+
+**CamDistill-8B**:
+```bash
+CAMDISTILL_DEPTH=8 CAMDISTILL_EXTRACT_LAYERS=1,3,5,7,9,11,13,15 \
+python camera_movement_sft/infer_single.py \
+    --model ddz16/CamDistill-8B \
     --video /path/to/your/video.mp4 \
     --variant camdistill
 ```
@@ -207,7 +239,10 @@ python camera_movement_sft/infer_single.py \
     --variant caminject
 ```
 
-> Replace `-4B` with `-8B` for the larger checkpoints.
+> Replacing `-4B` with `-8B` works for the CamSFT / CamInject examples, but **not
+> for CamDistill**: each checkpoint needs its own `CAMDISTILL_DEPTH` and
+> `CAMDISTILL_EXTRACT_LAYERS` (see Section 3.0). `infer_single.py` does not source
+> `env.sh`, so put them on the command line.
 
 ---
 
@@ -318,8 +353,10 @@ Key environment variables:
 |---|---|---|
 | `VGGT_CACHE_DIR` | — | Pre-extracted feature cache (**required**) |
 | `VGGT_TEACHER_TYPE` | `vggt` | `vggt` or `vggt_omega` |
-| `CAMDISTILL_LAMBDA` | `0.3` | Distillation loss weight |
-| `CAMDISTILL_DEPTH` | `6` | Number of Camera Token Module layers |
+| `CAMDISTILL_LAMBDA` | `0.3` | Distillation loss weight (training only; `0.05` was used for the released 8B checkpoint) |
+| `CAMDISTILL_DEPTH` | `6` | Number of alternating Camera Token Module layers. **Must also be set at inference** to match the checkpoint (4B: `4`, 8B: `8`) |
+| `CAMDISTILL_EXTRACT_LAYERS` | auto | Comma-separated ViT layer indices; length must equal `CAMDISTILL_DEPTH`. Released checkpoints: 4B `1,5,9,13`, 8B `1,3,5,7,9,11,13,15` |
+| `CAMDISTILL_CAM_DIM` | `1024` | Camera stream dim; `1024` for all released checkpoints |
 | `CAMDISTILL_WARMUP_STEPS` | `200` | Steps before distillation loss is enabled |
 | `CAMERA_TOKEN_INSERT_POSITION` | `front` | Insert camera token at `front` or `back` of each frame |
 
@@ -384,10 +421,15 @@ bash camera_movement_sft/eval/run_batch_checkpoints.sh <testset.jsonl>
 To evaluate a **CamDistill checkpoint** (needs the plugin; no online VGGT):
 
 ```bash
+CAMDISTILL_DEPTH=4 CAMDISTILL_EXTRACT_LAYERS=1,5,9,13 \
 USE_CAMDISTILL=1 \
 TRAIN_OUTPUT_DIR=output/camera_sft_qwen3vl_4b_camdistill/v0-<timestamp> \
 bash camera_movement_sft/eval/run_batch_checkpoints.sh <testset.jsonl>
 ```
+
+For an 8B CamDistill checkpoint use
+`CAMDISTILL_DEPTH=8 CAMDISTILL_EXTRACT_LAYERS=1,3,5,7,9,11,13,15` instead
+(see Section 3.0).
 
 To evaluate a **CamInject checkpoint** (always online mode):
 
